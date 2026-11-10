@@ -1,0 +1,10 @@
+/data/
+/reports/
+/backups/
+/dist/
+/appdash-gateway-config.json
+.env
+.env.*
+kanban-backup-*.json
+*.log
+node_modules/
