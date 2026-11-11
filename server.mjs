@@ -3,9 +3,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {execFile} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {promisify} from 'node:util';
+import {isDeepStrictEqual,promisify} from 'node:util';
 import {newPlanner,changesBetween,clone,validateNotifications,notificationMessage,buildReport,day,parseDate,sorts} from './public/model.mjs';
-import {runtime,tick,deliver,testConnection} from './engine.mjs';
+import {runtime,tick,deliver,testConnection,pendingReports,createNotificationQueue} from './engine.mjs';
 import {resolveReportFolder,testReportFolder,writeScheduledReport} from './report-files.mjs';
 import {BACKUP_LIMIT,STORE_SCHEMA,decodeWorkspace,createBackup,backupSummary,prepareImport,atomicWrite,readFolderSource,
   archiveStore,installFolderImport,recoverFolderImports} from './workspace-backup.mjs';
@@ -19,6 +19,7 @@ if(!Number.isInteger(PORT)||PORT<1||PORT>65535||PORT!==4197&&!testName)throw Err
 const DATA=path.join(BASE,'data',testName||''),REPORTS=path.join(BASE,'reports',testName||'');
 const BACKUPS=path.join(BASE,'backups',testName||'');
 const FILE=path.join(DATA,'store.json');
+const STATE_REQUEST_LIMIT=12_000_000;
 const runFile=promisify(execFile);
 let folderPickerOpen=false;
 async function pickNativeFolder(folder,signal,forImport=false){
@@ -102,17 +103,96 @@ async function loadStore(){
   return saved;
 }
 function purge(s,now=Date.now()){s.planners=s.planners.filter(p=>!p.deletedAt||now-Date.parse(p.deletedAt)<30*86400000);}
-function requireRevision(revision){
-  if(revision!==store.revision){const e=Error('다른 화면에서 데이터가 변경되었습니다. 현재 입력은 유지됩니다. 새로고침 전에 필요한 내용을 보관하세요.');e.status=409;throw e;}
+function saveConflict(){
+  return Object.assign(Error('다른 화면에서 데이터가 변경되었습니다. 현재 입력은 유지됩니다. 새로고침 전에 필요한 내용을 보관하세요.'),{status:409});
+}
+function requireRevision(revision){if(revision!==store.revision)throw saveConflict();}
+function plannerVersion(id){
+  return store.state.planners.some(p=>p.id===id)?(Object.hasOwn(store.plannerVersions??{},id)?store.plannerVersions[id]:store.revision):null;
+}
+function updateVersions(next){
+  const before=new Map(store.state.planners.map(p=>[p.id,p]));
+  next.plannerVersions=Object.fromEntries(next.state.planners.map(p=>[
+    p.id,isDeepStrictEqual(before.get(p.id),p)?plannerVersion(p.id):next.revision
+  ]));
+  next.uiVersion=isDeepStrictEqual(store.state.ui,next.state.ui)?store.uiVersion??store.revision:next.revision;
+}
+function checkPlannerSize(planner,version){
+  if(Buffer.byteLength(JSON.stringify({planner,version}))<=STATE_REQUEST_LIMIT)return;
+  const error=Error('Planner 저장 데이터가 12 MB를 초과합니다.');
+  error.status=413;
+  throw error;
 }
 async function saveState(state,revision){
   requireRevision(revision);
-  validateState(state);const next=clone(store);purge(state);next.runtime.journal.push(...changesBetween(store.state,state));next.runtime.observedAt=new Date().toISOString();next.state=state;next.revision++;await persist(next);store=next;return {state:store.state,revision:store.revision};
+  validateState(state);
+  const next=clone(store);
+  purge(state);
+  next.runtime.journal.push(...changesBetween(store.state,state));
+  next.runtime.observedAt=new Date().toISOString();
+  next.state=state;
+  next.revision++;
+  updateVersions(next);
+  await persist(next);
+  store=next;
+  return {state:store.state,revision:store.revision};
+}
+async function saveWorkspacePart(input){
+  const previousRevision=store.revision;
+  const state=clone(store.state);
+  const id=input.planner?.id;
+  if(input.ui&&input.planner===undefined){
+    if(input.version!==(store.uiVersion??store.revision))throw saveConflict();
+    state.ui=input.ui;
+  }else if(typeof id==='string'&&input.ui===undefined){
+    if(input.version!==plannerVersion(id))throw saveConflict();
+    checkPlannerSize(input.planner,previousRevision+1);
+    const index=state.planners.findIndex(p=>p.id===id);
+    if(index<0)state.planners.push(input.planner);
+    else state.planners[index]=input.planner;
+  }else throw Error('저장할 Planner 또는 화면 설정을 선택하세요.');
+  await saveState(state,previousRevision);
+  return {previousRevision,revision:store.revision,version:id?plannerVersion(id):store.uiVersion};
+}
+const notificationTests=new Map();
+async function saveNotifications(input){
+  const planner=store.state.planners.find(item=>item.id===input.planner&&!item.deletedAt);
+  if(!planner)throw Error('Planner를 찾을 수 없습니다.');
+  if(!isDeepStrictEqual(input.baseline,planner.notifications)){
+    const error=Error('다른 화면에서 알림 설정이 변경되었습니다. 최신 설정을 확인하세요.');
+    error.status=409;
+    error.notifications=planner.notifications;
+    throw error;
+  }
+  const notifications=validateNotifications(input.notifications);
+  const test=input.test;
+  if(test){
+    const row=notifications.rows.find(item=>item.id===test.row);
+    if(!['teams','outlook'].includes(test.channel)||!row)throw Error('테스트할 채널과 예약 시간을 선택하세요.');
+    if(row.reviewRequired)throw Error('양식을 검토하고 저장한 뒤 테스트 전송하세요.');
+    if(!notifications[test.channel+'Url'])throw Error('연결 주소를 입력하세요.');
+  }
+  const previousRevision=store.revision;
+  const previousVersion=plannerVersion(planner.id);
+  if(!isDeepStrictEqual(notifications,planner.notifications)){
+    const next=clone(store.state);
+    next.planners.find(item=>item.id===planner.id).notifications=notifications;
+    checkPlannerSize(next.planners.find(item=>item.id===planner.id),previousRevision+1);
+    await saveState(next,previousRevision);
+  }
+  const result={previousRevision,previousVersion,revision:store.revision,version:plannerVersion(planner.id),savedAt:store.runtime.observedAt,pendingReports:pendingReports(store)};
+  if(test){
+    const ticket=crypto.randomUUID();
+    notificationTests.set(ticket,{planner:clone(planner),notifications,row:test.row,channel:test.channel});
+    setTimeout(()=>notificationTests.delete(ticket),60_000).unref();
+    result.ticket=ticket;
+  }
+  return result;
 }
 async function writeReport(job,previous,planner){
   await writeScheduledReport(resolveReportFolder(planner.notifications.exportFolder,REPORTS),job,previous);
 }
-async function body(req,limit=12_000_000){
+async function body(req,limit=STATE_REQUEST_LIMIT){
   const chunks=[];
   let bytes=0;
   for await(const chunk of req){
@@ -132,9 +212,9 @@ async function backupAction(input,json,res){
   }
   return exclusive(async()=>{
     if(input?.action==='download'){
-      const text=JSON.stringify(createBackup(store,input.includeConnections===true),null,2);
+      const text=JSON.stringify(createBackup(store,input.includeConnections===true,input.planner),null,2);
       if(Buffer.byteLength(text)>BACKUP_LIMIT)throw Error('백업이 64 MiB를 초과합니다. 앱 폴더 전체를 복사해 보관하세요.');
-      res.setHeader('Content-Disposition',`attachment; filename="kanban-backup-${day()}.json"`);
+      res.setHeader('Content-Disposition',`attachment; filename="kanban-${input.planner?'planner':'backup'}-${day()}.json"`);
       res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});
       res.end(text);
       return;
@@ -149,15 +229,22 @@ async function backupAction(input,json,res){
       })});
     }
     if(folder&&folder.fingerprint!==input.fingerprint)throw Error('이전 앱의 파일이 변경되었습니다. 이전 앱을 종료하고 다시 확인하세요.');
-    const next=prepareImport(store,incoming,folder?'replace':input.mode);
+    const next=prepareImport(store,incoming,folder?'replace':input.mode,input.sourcePlanner,input.targetPlanner);
     validateState(next.state);
+    const existing=new Map(store.state.planners.map(p=>[p.id,p]));
+    for(const planner of next.state.planners){
+      if(!isDeepStrictEqual(existing.get(planner.id),planner))checkPlannerSize(planner,next.revision);
+    }
+    updateVersions(next);
     const raw=await fs.readFile(FILE,'utf8');
     if(folder)await installFolderImport(folder,{backups:BACKUPS,reports:REPORTS,raw,next,persist});
     else{
-      if(input.mode==='replace')await archiveStore(BACKUPS,raw);
+      if(['replace','replace-planner'].includes(input.mode))await archiveStore(BACKUPS,raw);
       await persist(next);
     }
     store=next;
+    if(folder||input.mode==='replace')scheduledNotifications.cancel();
+    if(input.mode==='replace-planner')scheduledNotifications.cancel(input.targetPlanner);
     return json({revision:store.revision});
   });
 }
@@ -172,11 +259,21 @@ const server=http.createServer(async(req,res)=>{
     if(req.method!=='GET'&&(!['http://127.0.0.1:'+PORT,'http://localhost:'+PORT].includes(req.headers.origin)||!req.headers['content-type']?.startsWith('application/json')))return json({error:'같은 앱 화면에서 JSON 요청을 사용하세요.'},403);
     if(!store)return json({ready:false,error:'저장소를 준비하고 있습니다.'},503);
     if(route==='/api/ready'&&req.method==='GET')return json({ready:true,name:'Kanban Planner (Beta)'});
-    if(route==='/api/state'&&req.method==='GET')return await exclusive(async()=>{const next=clone(store);purge(next.state);if(next.state.planners.length!==store.state.planners.length){next.revision++;await persist(next);store=next;}json({state:store.state,revision:store.revision,status:{projects:true,projectLabels:true,backups:true,savedAt:store.runtime.observedAt,pending:store.runtime.pending.length,delivery:Object.entries(store.runtime.delivery).slice(-30).map(([key,v])=>({key,...v})),reportPath:REPORTS,nativeFolderPicker:process.platform==='win32'}});});
+    if(route==='/api/state'&&req.method==='GET')return await exclusive(async()=>{const next=clone(store);purge(next.state);if(next.state.planners.length!==store.state.planners.length){next.revision++;updateVersions(next);await persist(next);store=next;}json({state:store.state,revision:store.revision,plannerVersions:Object.fromEntries(store.state.planners.map(p=>[p.id,plannerVersion(p.id)])),uiVersion:store.uiVersion??store.revision,status:{projects:true,projectLabels:true,backups:true,savedAt:store.runtime.observedAt,pending:store.runtime.pending.length,pendingReports:pendingReports(store),delivery:Object.entries(store.runtime.delivery).slice(-30).map(([key,v])=>({key,...v})),reportPath:REPORTS,nativeFolderPicker:process.platform==='win32'}});});
+    if(route==='/api/planner'&&req.method==='PUT'){const b=await body(req);return await exclusive(async()=>json(await saveWorkspacePart(b)));}
     if(route==='/api/backup'&&req.method==='POST')return await backupAction(await body(req,BACKUP_LIMIT+1024),json,res);
     if(route==='/api/state'&&req.method==='PUT'){const b=await body(req);return await exclusive(async()=>json(await saveState(b.state,b.revision)));}
     if(route==='/api/action'&&req.method==='POST'){
       const b=await body(req);
+      if(b.action==='notification-save')return await exclusive(async()=>json(await saveNotifications(b)));
+      if(b.action==='notification-test'){
+        const test=notificationTests.get(b.ticket);
+        if(!test)throw Error('테스트 요청이 만료되었습니다. 다시 시도하세요.');
+        notificationTests.delete(b.ticket);
+        try{await deliver(test.planner,test.notifications,test.row,test.channel);}
+        catch(error){return json({error:`설정 저장 완료 · 테스트 전송 실패. ${error.message}`},502);}
+        return json({text:'설정 저장 및 테스트 전송 완료'});
+      }
       if(['connection-test','folder-test','folder-pick'].includes(b.action)){
         if(!store.state.planners.some(p=>p.id===b.planner&&!p.deletedAt))throw Error('Planner를 찾을 수 없습니다.');
         if(b.action==='connection-test'){
@@ -211,13 +308,6 @@ const server=http.createServer(async(req,res)=>{
           const download=folder===REPORTS?{file:`/reports/${name}`}:{download:{name,text}};
           return json({text:`테스트 보고서 생성: ${destination}`,...download});
         }
-        if(['teams','outlook'].includes(b.action)){
-          if(row.reviewRequired)throw Error('양식을 검토하고 저장한 뒤 테스트 전송하세요.');
-          if(!n[b.action+'Url'])throw Error('연결 주소를 입력하세요.');
-          const state=clone(store.state);state.planners.find(x=>x.id===p.id).notifications=n;const saved=await saveState(state,b.revision);
-          try{await deliver(p,n,row.id,b.action);}catch(e){return json({...saved,error:e.message},502);}
-          return json({...saved,text:'설정 저장 및 테스트 전송 완료'});
-        }
         throw Error('지원하지 않는 실행입니다.');
       });
     }
@@ -226,7 +316,7 @@ const server=http.createServer(async(req,res)=>{
     if(route.startsWith('/reports/')){const name=decodeURIComponent(route.slice(9));if(!/^[a-zA-Z0-9_-]+\.txt$/.test(name))return json({error:'잘못된 파일 이름'},400);file=path.join(REPORTS,name);res.setHeader('Content-Disposition',`attachment; filename="${name}"`);}
     else{const files={'/':'index.html','/app.mjs':'app.mjs','/model.mjs':'model.mjs','/styles.css':'styles.css','/icon.svg':'icon.svg'};if(!files[route])return json({error:'찾을 수 없습니다.'},404);file=path.join(BASE,'public',files[route]);}
     try{const data=await fs.readFile(file);res.writeHead(200,{'Content-Type':mime[path.extname(file)]});res.end(data);}catch(e){if(e.code==='ENOENT')return json({error:'파일을 찾을 수 없습니다.'},404);throw e;}
-  }catch(e){if(!res.headersSent)json({error:e.message?.startsWith('ENOENT')?'파일 작업에 실패했습니다.':e.message||'처리에 실패했습니다.'},e.status||400);else res.end();}
+  }catch(e){if(!res.headersSent)json({error:e.message?.startsWith('ENOENT')?'파일 작업에 실패했습니다.':e.message||'처리에 실패했습니다.',...(e.notifications&&{notifications:e.notifications})},e.status||400);else res.end();}
 });
 try{
   await new Promise((resolve,reject)=>{
@@ -243,7 +333,24 @@ try{
   console.error(error.code==='EADDRINUSE'?`포트 ${PORT}가 사용 중입니다. 기존 앱을 종료하세요.`:error.message);
   process.exit(1);
 }
-const timer=setInterval(()=>exclusive(async()=>{const next=clone(store);purge(next.state);if(next.state.planners.length!==store.state.planners.length){next.revision++;await persist(next);store=next;}await tick(store,{writeReport,checkpoint:()=>persist(store)});}).catch(()=>console.error('예약 상태 저장 실패. data/reports 권한을 확인하세요.')),30000);
+const scheduledNotifications=createNotificationQueue({
+  readStore:()=>store,exclusive,checkpoint:persist,
+  send:(planner,row,channel,today)=>deliver(planner,planner.notifications,row,channel,fetch,today)
+});
+const timer=setInterval(()=>{
+  const observedAt=new Date();
+  exclusive(async()=>{
+    const next=clone(store);
+    purge(next.state);
+    if(next.state.planners.length!==store.state.planners.length){
+      next.revision++;
+      updateVersions(next);
+      await persist(next);
+      store=next;
+    }
+    await tick(store,{now:observedAt,writeReport,enqueueNotification:scheduledNotifications.enqueue,checkpoint:()=>persist(store)});
+  }).catch(()=>console.error('예약 상태 저장 실패. data/reports 권한을 확인하세요.'));
+},30000);
 console.log(`Kanban Planner (Beta) http://127.0.0.1:${PORT}\n저장: ${DATA}\n보고서: ${REPORTS}\n종료: Ctrl+C 또는 AppDash 중지`);
-async function stop(){clearInterval(timer);server.close();server.closeIdleConnections();await queue;process.exit(0);}
+async function stop(){clearInterval(timer);server.close();server.closeIdleConnections();await scheduledNotifications.close();await queue;process.exit(0);}
 process.on('SIGINT',stop);process.on('SIGTERM',stop);

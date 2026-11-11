@@ -22,11 +22,56 @@ let includeClosedBoardProjects=false;
 let messagePreviewChannel='teams';
 const planner=()=>state.planners.find(p=>p.id===selected&&!p.deletedAt);
 function notify(message,error=false){const t=$('#toast');t.textContent=message;t.className=error?'error':'visible';clearTimeout(notify.timer);notify.timer=setTimeout(()=>{t.className='';},error?6500:2800);}
-async function api(route,method='GET',body){const res=await fetch(route,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});const data=await res.json();if(data.revision!==undefined)revision=data.revision;if(!res.ok){const e=Error(data.error||'요청 실패');e.data=data;throw e;}return data;}
+async function api(route,method='GET',body){const res=await fetch(route,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});const data=await res.json();if(!res.ok){const e=Error(data.error||'요청 실패');e.data=data;throw e;}return data;}
+let savedState,plannerVersions=new Map(),uiVersion,latestKnownRevision=0;
+function acceptWorkspace(data){
+  state=data.state;
+  savedState=clone(state);
+  plannerVersions=new Map(Object.entries(data.plannerVersions??{}));
+  uiVersion=data.uiVersion;
+  revision=data.revision;
+  latestKnownRevision=data.revision;
+  status=data.status;
+}
+function acknowledgeSave(result){
+  latestKnownRevision=Math.max(latestKnownRevision,result.revision);
+  if(result.previousRevision===revision)revision=result.revision;
+  status.savedAt=result.savedAt??new Date().toISOString();
+}
+function enqueueSave(operation,{keepError=false}={}){
+  saving++;
+  storageLabel();
+  const run=saveChain.then(async()=>{
+    if(saveError)throw Error(saveError);
+    return operation();
+  });
+  saveChain=run.catch(error=>{if(keepError)saveError=error.message;}).finally(()=>{saving--;storageLabel();});
+  return run;
+}
 function persist(message='저장 완료'){
-  const snapshot=clone(state);saving++;storageLabel();
-  const run=saveChain.then(async()=>{if(saveError)throw Error(saveError);const result=await api('/api/state','PUT',{state:snapshot,revision});revision=result.revision;status.savedAt=new Date().toISOString();if(message)notify(message);});
-  saveChain=run.catch(e=>{saveError=e.message;notify(e.message,true);}).finally(()=>{saving--;storageLabel();});return run;
+  const snapshot=clone(state);
+  return enqueueSave(async()=>{
+    if(JSON.stringify(snapshot.ui)!==JSON.stringify(savedState.ui)){
+      const result=await api('/api/planner','PUT',{ui:snapshot.ui,version:uiVersion});
+      savedState.ui=snapshot.ui;
+      uiVersion=result.version;
+      acknowledgeSave(result);
+    }
+    const committed=new Map(savedState.planners.map((p,index)=>[p.id,index]));
+    for(const planner of snapshot.planners){
+      const index=committed.get(planner.id);
+      const previous=savedState.planners[index];
+      // A Task edit can have been queued before the notifications were saved.
+      if(previous)planner.notifications=previous.notifications;
+      if(previous&&JSON.stringify(planner)===JSON.stringify(previous))continue;
+      const result=await api('/api/planner','PUT',{planner,version:plannerVersions.get(planner.id)??null});
+      if(previous)savedState.planners[index]=planner;
+      else savedState.planners.push(planner);
+      plannerVersions.set(planner.id,result.version);
+      acknowledgeSave(result);
+    }
+    if(message)notify(message);
+  },{keepError:true}).catch(error=>{notify(error.message,true);throw error;});
 }
 function storageLabel(){const el=$('#save-state');if(el)el.textContent=saveError?'저장 실패 · 입력 유지':saving?'저장 중…':'모든 변경 저장됨';const detail=$('#storage-detail');if(detail)detail.textContent=saveError||`단일 base 내부에 저장됨 · 마지막 저장 ${new Date(status.savedAt).toLocaleString('ko-KR')}`;}
 function render(){
@@ -259,7 +304,42 @@ function dateControl(attr,value,label='날짜'){return `<div class="date-control
 function settings(p){return `<div class="settings-general"><div class="section-heading"><span class="eyebrow">MAKE IT YOURS</span><h2>일반 설정</h2></div><div class="general-grid"><section class="panel"><h3>Planner</h3><form data-form="planner-settings">${field('이름',input('name="name" maxlength="160"',p.name))}${field('설명',input('name="description" maxlength="300"',p.description))}<button class="primary">저장</button></form></section><section class="panel appearance"><h3>화면</h3><div class="width-setting">${field('버킷 가로 넓이',`<input type="range" data-width min="260" max="480" step="10" value="${p.appearance.width}">`)}${input('data-width-number min="260" max="480" step="10" aria-label="버킷 넓이 숫자"',p.appearance.width,'number')}<span>px</span>${btn('width-reset','초기화')}</div><div class="color-inputs">${['사이트 배경','사이드바','버킷 배경','Task 팝업'].map((name,i)=>field(name,input(`data-color="${i}" aria-label="${name}"`,p.appearance.colors[i].slice(0,7),'color'))).join('')}</div><p class="label-title">추천 색상 조합</p><div class="palette-list">${palettes.map((x,i)=>paletteButton(x,'palette',String(i))).join('')}</div><div class="subheading"><b>사용자 지정 조합</b>${btn('palette-add','현재 조합 추가')}</div><div class="palette-list">${p.appearance.custom.map((x,i)=>`<div class="custom-palette">${paletteButton(x,'palette-custom',String(i))}${ib('palette-delete','close','사용자 조합 삭제',String(i))}</div>`).join('')||'<span class="muted">저장된 조합 없음</span>'}</div>${btn('palette-reset','색상 초기화')}</section><section class="panel"><h3>완료 액션</h3><p class="muted">미완료 Task를 완료로 바꿀 때 적용합니다. 삭제는 Task를 영구 삭제합니다.</p><form data-form="completion">${field('동작',select('name="action" data-completion-action',[['none','없음'],['move','특정 버킷으로 이동'],['label','레이블 변경'],['delete','삭제']],p.completion.action))}<div id="completion-target">${completionTarget(p,p.completion.action)}</div><button class="primary">저장</button></form></section><section class="panel"><h3>버킷</h3><div class="management-list" data-bucket-manage>${p.buckets.map((b,i)=>`<div class="management-row" data-bucket-row="${b.id}"><span class="drag-handle" data-bucket-handle="${b.id}" tabindex="0" title="버킷 순서 이동">${icon('grip')}</span>${input(`data-manage-bucket="${b.id}" aria-label="버킷 이름 ${esc(b.name)}" maxlength="160"`,b.name)}${btn('bucket-up','↑',{id:b.id,title:'버킷 위로',disabled:i===0})}${btn('bucket-down','↓',{id:b.id,title:'버킷 아래로',disabled:i===p.buckets.length-1})}${ib('bucket-delete','trash','버킷 삭제',b.id,p.buckets.length===1)}</div>`).join('')}</div><form data-form="bucket-add" class="inline-form">${input('name="name" placeholder="새 버킷 이름" aria-label="새 버킷 이름" maxlength="160"')}<button>추가</button></form></section><section class="panel"><h3>레이블</h3>${p.labels.map(l=>`<div class="management-row">${input(`data-label-color="${l.id}" aria-label="${esc(labelName(p,l.id))} 색상"`,l.color,'color')}${input(`data-label-name="${l.id}" aria-label="${esc(labelName(p,l.id))} 이름" placeholder="${esc(labelName(p,l.id))}" maxlength="160"`,l.name)}${ib('label-delete','trash','레이블 삭제',l.id)}</div>`).join('')}<form data-form="label-add" class="inline-form">${input('name="name" placeholder="새 레이블명" aria-label="새 레이블명" maxlength="160"')}${input('name="color" aria-label="새 레이블 색상"','#2f8f83','color')}<button>추가</button></form></section><section class="panel storage"><h3>저장소</h3><div class="storage-icon">${icon('check')}</div><b>하나의 base, 하나의 워크스페이스</b><p id="storage-detail"></p><p class="muted">코드 · 설정 · Task · 보고서를 이 앱 폴더 안에서 관리합니다. PC와 서비스가 실행 중일 때 예약을 확인합니다.</p>${btn('save-retry','저장 다시 시도')}</section></div></div>${notifications(p)}${backupPanel()}`;}
 function completionTarget(p,a){return a==='move'?field('대상 버킷',select('name="bucket"',p.buckets.map(b=>[b.id,b.name]),p.completion.bucket)):a==='label'?field('대상 레이블',select('name="label"',p.labels.map(l=>[l.id,labelName(p,l.id)]),p.completion.label)):'';}
 function paletteButton(x,action,id){return btn(action,`<span class="swatches">${x.colors.map(c=>`<i style="background:${c}"></i>`).join('')}</span>${esc(x.name)}`,{id,cls:'palette'});}
-function draft(p){if(!notificationDrafts.has(p.id))notificationDrafts.set(p.id,clone(p.notifications));return notificationDrafts.get(p.id);}
+const sameNotifications=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+function notificationEdit(p){
+  let edit=notificationDrafts.get(p.id);
+  if(!edit||sameNotifications(edit.value,edit.baseline)&&!sameNotifications(edit.baseline,p.notifications)){
+    edit={baseline:clone(p.notifications),value:clone(p.notifications)};
+    notificationDrafts.set(p.id,edit);
+  }
+  return edit;
+}
+function draft(p){return notificationEdit(p).value;}
+async function saveNotificationEdit(p,notifications,test){
+  const edit=notificationEdit(p);
+  return enqueueSave(async()=>{
+    try{
+      const saved=await api('/api/action','POST',{action:'notification-save',planner:p.id,
+        baseline:edit.baseline,notifications,test});
+      const current=state.planners.find(item=>item.id===p.id);
+      if(current)current.notifications=clone(notifications);
+      const previous=savedState.planners.find(item=>item.id===p.id);
+      if(previous)previous.notifications=clone(notifications);
+      edit.baseline=clone(notifications);
+      if(plannerVersions.get(p.id)===saved.previousVersion)plannerVersions.set(p.id,saved.version);
+      acknowledgeSave(saved);
+      status.pendingReports=saved.pendingReports;
+      if(view==='settings'&&planner()?.id===p.id)redrawScheduleStatus();
+      return saved;
+    }catch(error){
+      if(error.data?.notifications){
+        const current=state.planners.find(item=>item.id===p.id);
+        if(current)current.notifications=error.data.notifications;
+        if(view==='settings'&&planner()?.id===p.id)redrawNotifications();
+      }
+      throw error;
+    }
+  });
+}
 function selectedMessageRow(p){
   const rows=draft(p).rows;
   return rows.find(r=>r.id===rowSelection.get(p.id))||rows[0];
@@ -353,17 +433,23 @@ function setReportFolder(p,selectedFolder){
   hideOutput();
 }
 function notifications(p){
-  const n=draft(p),selectedRow=selectedMessageRow(p);
+  const {baseline,value:n}=notificationEdit(p),selectedRow=selectedMessageRow(p);
   rowSelection.set(p.id,selectedRow.id);
   const deliveries=status.delivery?.filter(item=>item.key.startsWith(p.id+'/')).slice(-8)||[];
+  const pending=status.pendingReports?.[p.id];
   return `<div class="notification-section">
     <div class="section-heading"><span class="eyebrow">STAY IN THE LOOP</span><h2>알림과 예약 내보내기</h2><p>월~금, PC 로컬 시각에 실행합니다. 미리보기는 저장하거나 전송하지 않습니다.</p></div>
+    ${!sameNotifications(baseline,p.notifications)?`<section class="panel notification-conflict" aria-label="알림 설정 충돌">
+      <p role="status">다른 화면에서 알림 설정이 변경되었습니다. 이 화면의 입력을 보관하고 최신 설정을 불러온 뒤 필요한 변경을 다시 적용하세요.</p>
+      ${btn('notification-reload','최신 설정 불러오기')}
+    </section>`:''}
     <div class="notification-top"><section class="panel">
       <h3>채널</h3>${notificationDestinations(n)}${notificationSchedule(n)}
     </section>${messageFormEditor(p,n)}</div>
     ${notificationActions(n,selectedRow)}
     <section class="panel schedule-status"><h3>최근 예약 실행 상태</h3>
-      ${status.pending?`<p class="overdue">보고서 ${status.pending}건 재시도 대기</p>`:''}
+      ${pending?.retry?`<p class="overdue">보고서 ${pending.retry}건 재시도 대기</p>`:''}
+      ${pending?.paused?`<p class="muted">보고서 ${pending.paused}건 보류 중</p>`:''}
       ${deliveries.length?deliveries.map(item=>`<p class="${item.success?'':'overdue'}">${esc(item.key.split('/').slice(1).join(' · '))} · ${item.success?'완료':esc(item.error)}</p>`).join(''):'<p class="muted">아직 실행 기록이 없습니다.</p>'}
     </section></div>`;
 }
@@ -601,7 +687,35 @@ async function handleAction(action,id,el,e){const p=planner();
     case 'palette-delete':p.appearance.custom.splice(+id,1);render();await persist('');break;
     case 'palette-reset':p.appearance.colors=clone(palettes[0].colors);render();await persist('색상 초기화');break;
     case 'save-retry':saveError='';await persist();break;
-    case 'channel-toggle':{const n=draft(p),old=n[id];n[id]=!old;try{validateNotifications(n);p.notifications=clone(n);await persist('알림 설정 저장 완료');}catch(e){n[id]=old;throw e;}finally{render();}break;}
+    case 'channel-toggle':{
+      const edit=draft(p),n=clone(edit);
+      n[id]=!n[id];
+      validateNotifications(n);
+      edit[id]=n[id];
+      await saveNotificationEdit(p,n);
+      if(view==='settings'&&planner()?.id===p.id)redrawNotifications();
+      notify('알림 설정 저장 완료');
+      break;
+    }
+    case 'notification-reload':{
+      if(await confirmAction('최신 알림 설정 불러오기','이 화면의 저장하지 않은 알림 설정을 최신 설정으로 교체할까요?','불러오기')){
+        const requestedRevision=revision;
+        const fresh=await api('/api/state');
+        if(fresh.revision<latestKnownRevision)throw Error('설정이 다시 변경되었습니다. 최신 설정을 다시 불러오세요.');
+        const latest=fresh.state.planners.find(item=>item.id===p.id&&!item.deletedAt);
+        const current=state.planners.find(item=>item.id===p.id);
+        if(!latest||!current)throw Error('Planner를 찾을 수 없습니다.');
+        if(!saving&&!saveError&&!modal&&revision===requestedRevision){
+          acceptWorkspace(fresh);
+        }else current.notifications=latest.notifications;
+        notificationDrafts.delete(p.id);
+        if(view==='settings'&&planner()?.id===p.id){
+          redrawNotifications();
+          $('[data-action="notification-save"]')?.focus();
+        }
+      }
+      break;
+    }
     case 'row-add':{
       const n=draft(p),i=n.rows.findIndex(row=>row.id===id),used=new Set(n.rows.map(row=>row.time));
       const [hours,minutes]=n.rows[i].time.split(':').map(Number);
@@ -696,14 +810,13 @@ async function handleAction(action,id,el,e){const p=planner();
       break;
     }
     case 'message-review-save':case 'notification-save':{
-      const n=clone(draft(p));
+      const edit=draft(p),n=clone(edit);
       if(action==='message-review-save')n.rows.find(row=>row.id===id).reviewRequired=false;
       validateNotifications(n);
-      p.notifications=n;
-      await persist('알림 설정 저장 완료');
+      if(action==='message-review-save')edit.rows.find(row=>row.id===id).reviewRequired=false;
+      await saveNotificationEdit(p,n);
+      notify('알림 설정 저장 완료');
       if(action==='message-review-save'){
-        const row=draft(p).rows.find(item=>item.id===id);
-        if(row)row.reviewRequired=false;
         if(view==='settings'&&planner()?.id===p.id){
           redrawNotifications();
           $(`[data-row="${id}"][data-key="formId"]`)?.focus();
@@ -716,9 +829,16 @@ async function handleAction(action,id,el,e){const p=planner();
       validateNotifications(n);
       el.disabled=true;busyActions++;hideOutput();
       try{
-        await saveChain;if(saveError)throw Error(saveError);
-        const data=await api('/api/action','POST',{action:action.slice(13),planner:p.id,notifications:n,row,channel,revision});
-        if(data.state){state=data.state;revision=data.revision;notificationDrafts.set(p.id,clone(n));}
+        let data;
+        const command=action.slice(13);
+        if(command==='teams'||command==='outlook'){
+          const {ticket}=await saveNotificationEdit(p,n,{channel:command,row});
+          data=await api('/api/action','POST',{action:'notification-test',ticket});
+        }else{
+          await saveChain;
+          if(saveError)throw Error(saveError);
+          data=await api('/api/action','POST',{action:command,planner:p.id,notifications:n,row,channel});
+        }
         const out=view==='settings'&&planner()?.id===p.id?$('#notification-output'):null;
         if(out){
           out.hidden=false;
@@ -727,7 +847,6 @@ async function handleAction(action,id,el,e){const p=planner();
         }
         if(action!=='notification-preview')notify(data.text);
       }catch(e){
-        if(e.data?.state){state=e.data.state;notificationDrafts.set(p.id,clone(n));}
         const out=view==='settings'&&planner()?.id===p.id?$('#notification-output'):null;
         if(out){out.hidden=false;out.textContent=e.message;}
         throw e;
@@ -749,9 +868,10 @@ function backupPanel(){
   if(!status.backups)return '';
   return `<section class="panel backup-panel" aria-labelledby="backup-title">
     <h3 id="backup-title">데이터 백업</h3>
-    <p class="muted">이 앱 폴더의 모든 Planner에 적용됩니다. 저장된 목표·Task·설정·변경 기록을 백업합니다.</p>
+    <p class="muted">선택한 Planner의 목표·Task·설정·변경 기록을 백업합니다.</p>
     <div class="backup-options">
       <div>
+        ${field('백업 범위',select('id="backup-planner"',[['','전체 작업 공간'],...state.planners.filter(p=>!p.deletedAt).map(p=>[p.id,p.name])],planner()?.id??''))}
         ${check('id="backup-connections"',false,'Teams·Outlook 연결 주소 포함')}
         <div class="row-actions">${btn('backup-download','JSON 백업 내려받기')}</div>
       </div>
@@ -764,17 +884,35 @@ function backupPanel(){
 }
 function openBackupReview(backup,summary,trigger){
   modal={kind:'backup-review',backup,summary,trigger};
+  const targets=state.planners.filter(p=>!p.deletedAt);
+  const sourceOptions=summary.choices.map(p=>[p.id,`${p.name} · Task ${p.tasks}개`]);
+  const sourceDefault=sourceOptions.length===1?sourceOptions[0][0]:'';
+  const modes=[['append','새 Planner로 추가']];
+  if(targets.length&&sourceOptions.length)modes.push(['replace-planner','기존 Planner 하나에 복원']);
+  if(summary.scope!=='planner')modes.push(['replace','전체 복원 · 작업 공간 교체 전 백업']);
   $('#overlay').innerHTML=`<div class="modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="backup-review-title" class="dialog small">
     <div class="dialog-header"><h2 id="backup-review-title">백업 JSON 가져오기</h2>${ib('modal-cancel','close','닫기')}</div>
     <p>Planner ${summary.planners}개 · Task ${summary.tasks}개</p>
-    ${field('가져오기 방식',select('id="backup-import-mode"',[
-      ['append',`새 Planner로 추가 · ${summary.activePlanners}개 (Task ${summary.activeTasks}개)`],['replace','전체 복원 · 현재 데이터 교체 전 백업']
-    ],'append'))}
+    ${field('가져오기 방식',select('id="backup-import-mode"',modes,sourceOptions.length?'append':'replace'))}
+    ${field('백업의 Planner',select('id="backup-source-planner"',[['','활성 Planner 모두'],...sourceOptions],sourceDefault))}
+    <div id="backup-target-field" hidden>
+      ${field('복원할 기존 Planner',select('id="backup-target-planner"',targets.map(p=>[p.id,p.name]),planner()?.id))}
+      <p class="muted">복원 전에 현재 데이터를 백업한 뒤 선택한 기존 Planner를 교체합니다.</p>
+    </div>
     <p class="muted">가져온 Planner의 자동 알림과 예약 내보내기는 설정에서 다시 켤 수 있습니다.</p>
     <p id="backup-review-error" class="danger-text" role="status"></p>
     <div class="dialog-actions">${btn('modal-cancel','취소')}${btn('backup-apply','가져오기',{cls:'primary'})}</div>
   </section></div>`;
+  updateBackupMode();
   $('#backup-import-mode').focus();
+}
+function updateBackupMode(){
+  const mode=$('#backup-import-mode').value;
+  const source=$('#backup-source-planner');
+  source.closest('label').hidden=mode==='replace';
+  source.options[0].disabled=mode==='replace-planner';
+  if(mode==='replace-planner'&&!source.value)source.selectedIndex=1;
+  $('#backup-target-field').hidden=mode!=='replace-planner';
 }
 async function handleBackup(action,button){
   button.disabled=true;
@@ -784,13 +922,14 @@ async function handleBackup(action,button){
     if(saveError)throw Error(saveError);
     if(!button.isConnected)return;
     if(action==='backup-download'){
+      const planner=$('#backup-planner').value||undefined;
       const res=await fetch('/api/backup',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({action:'download',includeConnections:$('#backup-connections').checked})});
+        body:JSON.stringify({action:'download',planner,includeConnections:$('#backup-connections').checked})});
       if(!res.ok)throw Error((await res.json()).error);
       const url=URL.createObjectURL(await res.blob());
       const link=document.createElement('a');
       link.href=url;
-      link.download=`kanban-backup-${day()}.json`;
+      link.download=`kanban-${planner?'planner':'backup'}-${day()}.json`;
       link.click();
       setTimeout(()=>URL.revokeObjectURL(url),1000);
       return;
@@ -799,17 +938,19 @@ async function handleBackup(action,button){
       const review=modal;
       const {backup,summary}=review;
       const mode=$('#backup-import-mode').value;
+      const sourcePlanner=mode==='replace'?undefined:$('#backup-source-planner').value||undefined;
+      const targetPlanner=mode==='replace-planner'?$('#backup-target-planner').value:undefined;
       if(mode==='append'&&!summary.activePlanners)throw Error('추가할 활성 Planner가 없습니다. 전체 복원을 선택할 수 있습니다.');
       review.applying=true;
       $('#backup-review-error').textContent='가져오는 중…';
       try{
-        await api('/api/backup','POST',{kind:'file',backup,action:'apply',mode,revision:summary.currentRevision});
+        await api('/api/backup','POST',{kind:'file',backup,action:'apply',mode,sourcePlanner,targetPlanner,revision:summary.currentRevision});
         const fresh=await api('/api/state');
-        state=fresh.state;
-        status=fresh.status;
-        notificationDrafts.clear();
-        formSelection.clear();
-        rowSelection.clear();
+        acceptWorkspace(fresh);
+        for(const map of [notificationDrafts,formSelection,rowSelection]){
+          if(mode==='replace')map.clear();
+          else if(targetPlanner)map.delete(targetPlanner);
+        }
         if(!planner()){selected=null;view='home';}
         review.applying=false;
         closeModal();
@@ -845,6 +986,13 @@ function hideOutput(){
 function redrawNotifications(){
   hideOutput();
   $('.notification-section').outerHTML=notifications(planner());
+}
+function redrawScheduleStatus(){
+  const panel=$('.schedule-status');
+  if(!panel)return;
+  const next=document.createElement('div');
+  next.innerHTML=notifications(planner());
+  panel.replaceWith(next.querySelector('.schedule-status'));
 }
 document.addEventListener('click',e=>{if(e.target.closest('#confirm'))return;const action=e.target.closest('[data-action]');if(action){e.preventDefault();if(action.disabled)return;handleAction(action.dataset.action,action.dataset.id,action,e).catch(err=>notify(err.message,true));return;}if(e.target.classList.contains('modal-backdrop')){closeModal();return;}if(e.target.closest('#label-search')){if(pop?.kind!=='labels')openPop('labels',e.target);return;}const card=e.target.closest('[data-task]');if(card&&!e.target.closest('input,button')&&Date.now()>suppressClick)openTask(card.dataset.task);});
 document.addEventListener('toggle',e=>{const key=e.target.dataset?.projectLane;if(key){if(e.target.open)collapsedProjects.delete(key);else collapsedProjects.add(key);}},true);
@@ -939,6 +1087,7 @@ function notificationInput(el){
   }
 }
 document.addEventListener('change',e=>{const el=e.target,p=planner();(async()=>{
+  if(el.id==='backup-import-mode')updateBackupMode();
   if(el.id==='task-project'){
     captureTask();
     if(task.completedByProject&&task.completedByProject!==task.projectId){
@@ -1024,6 +1173,23 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'&&drag){cleanDrag();s
 window.addEventListener('beforeunload',e=>{if(modal?.kind==='task'||modal?.applying||saving||saveError){e.preventDefault();e.returnValue='';}});
 window.addEventListener('resize',()=>{if(pop)renderPopover();});
 wideProjectView.addEventListener('change',()=>{if(projectPreview)render();});
-try{const data=await api('/api/state');state=data.state;revision=data.revision;status=data.status;render();}catch(e){$('#app').innerHTML=`<div class="startup-error"><h1>Planner를 불러올 수 없습니다.</h1><p>${esc(e.message)}</p><p>서버가 실행 중인지 확인한 후 새로고침하세요.</p></div>`;}
+try{acceptWorkspace(await api('/api/state'));render();}catch(e){$('#app').innerHTML=`<div class="startup-error"><h1>Planner를 불러올 수 없습니다.</h1><p>${esc(e.message)}</p><p>서버가 실행 중인지 확인한 후 새로고침하세요.</p></div>`;}
 
-setInterval(async()=>{if(!state||saving||modal||saveError||busyActions||$('#confirm'))return;try{const res=await fetch('/api/state');if(!res.ok)return;const data=await res.json();const capabilityChanged=status.projects!==data.status.projects||status.projectLabels!==data.status.projectLabels;status=data.status;if(capabilityChanged||data.revision!==revision){state=data.state;revision=data.revision;if(!planner()){selected=null;view='home';}render();}else if(view==='settings'){const el=$('.schedule-status');if(el){const next=document.createElement('div');next.innerHTML=notifications(planner());el.replaceWith(next.querySelector('.schedule-status'));}}}catch{}},30000);
+const canRefresh=()=>state&&!saving&&!modal&&!saveError&&!busyActions&&!$('#confirm');
+let refreshing=false;
+setInterval(async()=>{
+  if(refreshing||!canRefresh())return;
+  const requestedRevision=revision;
+  refreshing=true;
+  try{
+    const data=await api('/api/state');
+    if(!canRefresh()||revision!==requestedRevision||data.revision<latestKnownRevision)return;
+    const capabilityChanged=status.projects!==data.status.projects||status.projectLabels!==data.status.projectLabels;
+    status=data.status;
+    if(capabilityChanged||data.revision!==revision){
+      acceptWorkspace(data);
+      if(!planner()){selected=null;view='home';}
+      render();
+    }else if(view==='settings')redrawScheduleStatus();
+  }catch{}finally{refreshing=false;}
+},30000);

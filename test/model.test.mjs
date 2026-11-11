@@ -131,7 +131,7 @@ test('notification forms are independent of board filters and reports retain his
  assert.match(m.buildReport(p,n,row.id,changed,changes),/목표: Office/);
  m.removeProject(p,a.id);
 });
-import {runtime,tick,deliver,testConnection} from '../engine.mjs';
+import {runtime,tick,deliver,testConnection,pendingReports,createNotificationQueue} from '../engine.mjs';
 import {migrateNotifications} from '../notification-migration.mjs';
 const D='2026-11-06',stamp='2026-11-06T08:00:00.000Z';
 function fixture(){const p=m.newPlanner();const make=(title,extra={})=>{const t={...m.newTask(p,p.buckets[0].id),title,...extra};m.saveTask(p,t);return p.tasks.find(x=>x.id===t.id);};return {p,make};}
@@ -286,6 +286,49 @@ test('review holds scheduled delivery and previously queued exports until the ro
 test('scheduler weekdays, exact minute, successful channels independent; failures retry within minute',async()=>{
  const {p,store,now}=scheduledFixture();let teams=0,outlook=0,exports=0;const send=async(p,n,r,ch)=>{if(ch==='teams')teams++;else{outlook++;if(outlook===1)throw Error('test failure');}};const writeReport=async()=>{exports++;};await tick(store,{now,send,writeReport});await tick(store,{now,send,writeReport});assert.equal(teams,1);assert.equal(outlook,2);assert.equal(exports,1);await tick(store,{now:new Date('2026-11-06T09:00:00'),send,writeReport});assert.equal(outlook,2);await tick(store,{now:new Date('2026-11-07T08:00:00'),send,writeReport});assert.equal(exports,1);p.deletedAt=now.toISOString();await tick(store,{now:new Date('2026-11-09T08:00:00'),send,writeReport});assert.equal(teams,1);
 });
+test('slow scheduled delivery leaves saves free and delivers the next observed minute once',async()=>{
+ const p=m.newPlanner();
+ const n=p.notifications;
+ n.teams=true;
+ n.teamsUrl='https://example.invalid/scheduled';
+ const first=n.rows[0],second={...first,id:m.uid(),time:'08:01'};
+ n.rows.push(second);
+ const store={state:{planners:[p]},runtime:runtime()};
+ let now=new Date('2026-11-06T08:00:30'),tail=Promise.resolve(),releaseFirst,startFirst,finishBoth;
+ const gate=new Promise(resolve=>{releaseFirst=resolve;});
+ const started=new Promise(resolve=>{startFirst=resolve;});
+ const finished=new Promise(resolve=>{finishBoth=resolve;});
+ const sent=[];
+ const exclusive=callback=>{
+  const work=tail.then(callback);
+  tail=work.catch(()=>{});
+  return work;
+ };
+ const scheduler=createNotificationQueue({
+  readStore:()=>store,exclusive,concurrency:1,clock:()=>now,
+  checkpoint:async()=>{if(Object.keys(store.runtime.delivery).length===2)finishBoth();},
+  send:async(planner,row)=>{
+   sent.push([row,planner.name]);
+   if(row===first.id){startFirst();await gate;}
+  }
+ });
+ const observe=observedAt=>exclusive(()=>tick(store,{now:observedAt,enqueueNotification:scheduler.enqueue}));
+ await observe(now);
+ await started;
+ await observe(now);
+ now=new Date('2026-11-06T08:01:30');
+ await exclusive(()=>{p.name='Saved during delivery';});
+ await observe(now);
+ await observe(now);
+ assert.deepEqual(sent,[[first.id,'Kanban Planner']]);
+ now=new Date('2026-11-06T08:02:00');
+ releaseFirst();
+ await finished;
+ await observe(now);
+ await scheduler.close();
+ assert.deepEqual(sent,[[first.id,'Kanban Planner'],[second.id,'Saved during delivery']]);
+ assert.ok(Object.values(store.runtime.delivery).every(result=>result.success));
+});
 test('failed export retains original snapshot and retries after minute, with no duplicate successful history',async()=>{
  const {p,store,now}=scheduledFixture();p.notifications.teams=p.notifications.outlook=false;let n=0,first;
  const writeReport=async(job,previous,planner)=>{
@@ -297,6 +340,36 @@ test('failed export retains original snapshot and retries after minute, with no 
  p.name='later edit';p.notifications.exportFolder='updated destination';
  await tick(store,{now:new Date('2026-11-09T10:22:00'),writeReport});assert.equal(n,2);assert.equal(store.runtime.pending.length,0);
  await tick(store,{now:new Date('2026-11-09T10:22:30'),writeReport});assert.equal(n,2);
+});
+test('pending reports pause while disabled and are cancelled when the original row is removed',async()=>{
+ const {p,store,now}=scheduledFixture();
+ p.notifications.teams=p.notifications.outlook=false;
+ const row=p.notifications.rows[0];
+ await tick(store,{now,writeReport:async()=>{throw Error('disk');}});
+ const original=m.clone(store.runtime.pending[0]);
+ const writes=[];
+ const later=new Date('2026-11-09T10:22:00');
+ const run=()=>tick(store,{now:later,writeReport:async job=>writes.push(job)});
+ p.notifications.export=false;
+ assert.deepEqual(pendingReports(store)[p.id],{paused:1,retry:0});
+ await run();
+ p.notifications.export=true;
+ row.export=false;
+ await run();
+ assert.equal(writes.length,0);
+ assert.deepEqual(store.runtime.pending,[original]);
+ row.export=true;
+ await run();
+ await run();
+ assert.deepEqual(writes,[original]);
+ store.runtime.pending.push({...original,key:'another-failed-report'});
+ p.notifications.rows[0]={...row,id:m.uid()};
+ assert.equal(pendingReports(store)[p.id],undefined);
+ let checkpoints=0;
+ await tick(store,{now:later,writeReport:async job=>writes.push(job),checkpoint:async()=>checkpoints++});
+ assert.equal(checkpoints,1);
+ assert.equal(store.runtime.pending.length,0);
+ assert.deepEqual(writes,[original]);
 });
 test('scheduled report reconstructs current tasks at scheduled time and excludes later in-minute changes',async()=>{
  const {p,store,now}=scheduledFixture();p.notifications.teams=p.notifications.outlook=false;

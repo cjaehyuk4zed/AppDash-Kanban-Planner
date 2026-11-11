@@ -32,10 +32,6 @@ function validateRuntime(value){
 
 const migrations=new Map([[1,value=>{
   for(const planner of value.state.planners)planner.notifications=migrateNotifications(planner.notifications);
-  for(const job of value.runtime.pending){
-    const row=value.state.planners.find(planner=>planner.id===job.planner)?.notifications.rows.find(row=>row.time===job.time);
-    if(row)job.rowId=row.id;
-  }
 }]]);
 
 export function decodeWorkspace(value,validateState,{allowBackup=false}={}){
@@ -57,25 +53,39 @@ export function decodeWorkspace(value,validateState,{allowBackup=false}={}){
     value.revision=(value.revision??0)+1;
   }
   validateState(value.state);
+  for(const job of value.runtime.pending.filter(job=>job.rowId===undefined)){
+    const row=value.state.planners.find(planner=>planner.id===job.planner)?.notifications.rows.find(row=>row.time===job.time);
+    job.rowId=row?.id??null;
+  }
   return value;
 }
 
-export function createBackup(store,includeConnections){
-  const {state,runtime:history}=clone(store);
+export function createBackup(store,includeConnections,plannerId){
+  const planner=plannerId?store.state.planners.find(item=>item.id===plannerId):null;
+  if(plannerId&&!planner)throw Error('백업할 Planner를 찾을 수 없습니다.');
+  const state=clone(planner?{ui:store.state.ui,planners:[planner]}:store.state);
+  const history=clone(planner?{
+    ...store.runtime,
+    journal:store.runtime.journal.filter(item=>item.planner===planner.id),
+    delivery:Object.fromEntries(Object.entries(store.runtime.delivery).filter(([key])=>key.startsWith(planner.id+'/'))),
+    reports:Object.fromEntries(Object.entries(store.runtime.reports).filter(([id])=>id===planner.id)),
+    pending:[]
+  }:store.runtime);
   for(const planner of state.planners){
     if(!includeConnections)Object.assign(planner.notifications,{teamsUrl:'',outlookUrl:''});
   }
-  return {format:BACKUP_FORMAT,version:1,schema:STORE_SCHEMA,state,runtime:{...history,pending:[]}};
+  return {format:BACKUP_FORMAT,version:1,schema:STORE_SCHEMA,...(planner&&{scope:'planner'}),state,runtime:{...history,pending:[]}};
 }
 
-export function backupSummary({state}){
+export function backupSummary({state,scope}){
   const active=state.planners.filter(planner=>!planner.deletedAt);
   return {planners:state.planners.length,activePlanners:active.length,tasks:state.planners.reduce((count,p)=>count+p.tasks.length,0),
-    activeTasks:active.reduce((count,p)=>count+p.tasks.length,0)};
+    activeTasks:active.reduce((count,p)=>count+p.tasks.length,0),scope,
+    choices:active.map(p=>({id:p.id,name:p.name,tasks:p.tasks.length}))};
 }
 
-function copiedPlanner(planner,journal){
-  const ids=new Map();
+function copiedPlanner(planner,journal,targetId){
+  const ids=new Map(targetId?[[planner.id,targetId]]:[]);
   const copyId=value=>{
     if(!value)return value;
     if(!ids.has(value))ids.set(value,uid());
@@ -119,8 +129,13 @@ function copiedPlanner(planner,journal){
   }
 }
 
-export function prepareImport(current,source,mode){
+export function prepareImport(current,source,mode,sourcePlanner,targetPlanner){
   const incoming=clone(source);
+  if(mode==='replace'&&(sourcePlanner||incoming.scope==='planner'))throw Error('Planner 백업은 새 Planner로 추가하거나 기존 Planner에 복원하세요.');
+  if(sourcePlanner){
+    incoming.state.planners=incoming.state.planners.filter(p=>p.id===sourcePlanner&&!p.deletedAt);
+    if(!incoming.state.planners.length)throw Error('가져올 Planner를 찾을 수 없습니다.');
+  }
   for(const planner of incoming.state.planners){
     Object.assign(planner.notifications,{teams:false,outlook:false,export:false,exportFolder:''});
   }
@@ -129,14 +144,27 @@ export function prepareImport(current,source,mode){
     const history={...runtime(now),...incoming.runtime,observedAt:now,pending:[]};
     return {schema:STORE_SCHEMA,revision:current.revision+1,state:incoming.state,runtime:history};
   }
-  if(mode!=='append')throw Error('가져오기 방식을 선택하세요.');
+  if(!['append','replace-planner'].includes(mode))throw Error('가져오기 방식을 선택하세요.');
   const next=clone(current);
   const changes=new Map();
   for(const entry of incoming.runtime.journal){
     if(!changes.has(entry.planner))changes.set(entry.planner,[]);
     changes.get(entry.planner).push(entry);
   }
-  for(const planner of incoming.state.planners.filter(planner=>!planner.deletedAt)){
+  const active=incoming.state.planners.filter(planner=>!planner.deletedAt);
+  if(!active.length)throw Error('가져올 활성 Planner가 없습니다.');
+  if(mode==='replace-planner'){
+    const index=next.state.planners.findIndex(p=>p.id===targetPlanner&&!p.deletedAt);
+    if(index<0||active.length!==1)throw Error('가져올 Planner 하나와 복원할 기존 Planner를 선택하세요.');
+    const [planner]=active;
+    const entries=changes.get(planner.id)??[];
+    copiedPlanner(planner,entries,targetPlanner);
+    next.state.planners[index]=planner;
+    next.runtime.journal=next.runtime.journal.filter(item=>item.planner!==targetPlanner).concat(entries);
+    next.runtime.pending=next.runtime.pending.filter(item=>item.planner!==targetPlanner);
+    next.runtime.delivery=Object.fromEntries(Object.entries(next.runtime.delivery).filter(([key])=>!key.startsWith(targetPlanner+'/')));
+    delete next.runtime.reports[targetPlanner];
+  }else for(const planner of active){
     const entries=changes.get(planner.id)??[];
     copiedPlanner(planner,entries);
     next.state.planners.push(planner);

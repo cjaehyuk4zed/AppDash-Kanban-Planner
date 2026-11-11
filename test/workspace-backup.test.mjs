@@ -146,6 +146,38 @@ test('clean release starts, keeps data in place across code updates, and imports
     assert.equal((await state()).state.planners.length,1);
     const replaceArchive=(await fs.readdir(backups)).find(name=>name.startsWith('store.before-import-'));
     assert.equal(await fs.readFile(path.join(backups,replaceArchive),'utf8'),beforeReplace);
+    const originalWorkspace=await state();
+    const large=newPlanner('Large Planner');
+    for(let i=0;i<65;i++)large.tasks.push({...newTask(large,large.buckets[0].id),title:`Large Task ${i}`,notes:'n'.repeat(95_000)});
+    const savePlanner=(planner,version)=>request('/api/planner','PUT',{planner,version});
+    assert.equal((await savePlanner(large,null)).status,200);
+    const oneLarge=await state();
+    const plannerBackup=await backup({action:'download',planner:large.id});
+    assert.equal(plannerBackup.status,200);
+    assert.equal(plannerBackup.data.scope,'planner');
+    assert.deepEqual(plannerBackup.data.state.planners.map(p=>p.id),[large.id]);
+    assert.ok(plannerBackup.data.runtime.journal.every(entry=>entry.planner===large.id));
+    assert.equal((await backup({action:'apply',kind:'file',mode:'replace',revision:oneLarge.revision,backup:plannerBackup.data})).status,400);
+    assert.equal((await backup({action:'apply',kind:'file',mode:'append',revision:oneLarge.revision,backup:plannerBackup.data})).status,200);
+    const combined=await state();
+    assert.ok(Buffer.byteLength(JSON.stringify(combined.state))>12_000_000);
+    const otherLarge=combined.state.planners.at(-1);
+    large.tasks[0].title='Edited first large Planner';
+    otherLarge.tasks[0].title='Edited second large Planner';
+    assert.equal((await savePlanner(large,combined.plannerVersions[large.id])).status,200);
+    assert.equal((await savePlanner(otherLarge,combined.plannerVersions[otherLarge.id])).status,200);
+    assert.equal((await savePlanner(large,combined.plannerVersions[large.id])).status,409);
+    const savedPlanners=await state();
+    const target=originalWorkspace.state.planners[0].id;
+    assert.equal((await backup({action:'apply',kind:'file',mode:'replace-planner',revision:savedPlanners.revision,
+      backup:redacted.data,sourcePlanner:redacted.data.state.planners[0].id,targetPlanner:target})).status,200);
+    const replaced=await state();
+    assert.equal(replaced.state.planners[0].id,target);
+    assert.notEqual(replaced.state.planners[0].tasks[0].id,originalWorkspace.state.planners[0].tasks[0].id);
+    assert.deepEqual(replaced.state.planners.slice(1).map(p=>p.tasks[0].title),['Edited first large Planner','Edited second large Planner']);
+    await stop();
+    await start();
+    assert.deepEqual((await state()).plannerVersions,replaced.plannerVersions);
     await stop();
     const savedRaw=await fs.readFile(file,'utf8');
     for(const invalid of ['{invalid',JSON.stringify({...JSON.parse(savedRaw),schema:999})]){

@@ -5,12 +5,26 @@ import net from 'node:net';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {clone,newPlanner,newProject} from '../public/model.mjs';
+import {clone,newPlanner,newProject,newSection} from '../public/model.mjs';
 import {runtime} from '../engine.mjs';
 const base=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 test('real HTTP lifecycle, readiness, persistence/restart, revision conflict, preview/export isolation and security',async()=>{
  const listener=net.createServer();await new Promise(r=>listener.listen(0,'127.0.0.1',r));const port=listener.address().port;await new Promise(r=>listener.close(r));const instance='test-'+crypto.randomUUID();let child;
- const start=async()=>{child=spawn(process.execPath,['server.mjs'],{cwd:base,env:{...process.env,KANBAN_PORT:String(port),KANBAN_TEST_INSTANCE:instance},stdio:['ignore','pipe','pipe'],windowsHide:true});let output='';child.stderr.on('data',b=>output+=b);await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('startup timeout '+output)),10000);child.stdout.on('data',b=>{output+=b;if(output.includes('http://')){clearTimeout(timer);resolve();}});child.on('error',reject);child.on('exit',code=>{if(code){clearTimeout(timer);reject(Error('exit '+code+' '+output));}});});};
+ const dataDir=path.join(base,'data',instance);
+ const sentFile=path.join(dataDir,'mock-notification.json'),releaseFile=path.join(dataDir,'mock-notification-release');
+ const mockFetch=`import fs from 'node:fs/promises';
+   const original=globalThis.fetch;
+   globalThis.fetch=async(url,options)=>{
+     if(url==='https://example.invalid/mock-outlook')return {ok:false};
+     if(url!=='https://example.invalid/mock-teams')return original(url,options);
+     await fs.writeFile(${JSON.stringify(sentFile)},options.body);
+     for(let attempt=0;attempt<300;attempt++){
+       if(await fs.stat(${JSON.stringify(releaseFile)}).then(()=>true,()=>false))return {ok:true};
+       await new Promise(resolve=>setTimeout(resolve,20));
+     }
+     throw Error('mock notification was not released');
+   };`;
+ const start=async()=>{child=spawn(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(mockFetch),'server.mjs'],{cwd:base,env:{...process.env,KANBAN_PORT:String(port),KANBAN_TEST_INSTANCE:instance},stdio:['ignore','pipe','pipe'],windowsHide:true});let output='';child.stderr.on('data',b=>output+=b);await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('startup timeout '+output)),10000);child.stdout.on('data',b=>{output+=b;if(output.includes('http://')){clearTimeout(timer);resolve();}});child.on('error',reject);child.on('exit',code=>{if(code){clearTimeout(timer);reject(Error('exit '+code+' '+output));}});});};
  const stop=async()=>{if(!child||child.exitCode!==null)return;const done=new Promise(r=>child.once('exit',r));child.kill();await done;};
  const url=`http://127.0.0.1:${port}`,req=async(route,method='GET',data,origin=url)=>{const r=await fetch(url+route,{method,headers:{Origin:origin,'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined});return {status:r.status,data:await r.json()};};
  try{
@@ -26,7 +40,6 @@ test('real HTTP lifecycle, readiness, persistence/restart, revision conflict, pr
       {name:'completedToday',status:'complete',field:'completed',condition:'today',priority:'all',label:'all',bucket:'all',export:true}
     ],include:['due'],empty:'기한 초과/당일/임박 Task 없음 ~~'
   };
-  const dataDir=path.join(base,'data',instance);
   const backupDir=path.join(base,'backups',instance);
   await fs.mkdir(dataDir,{recursive:true});
   const legacyRaw=JSON.stringify({schema:1,revision:0,state:{ui:{collapsed:false},planners:[legacy]},runtime:runtime()});
@@ -90,5 +103,48 @@ test('real HTTP lifecycle, readiness, persistence/restart, revision conflict, pr
   await stop();await start();const again=(await req('/api/state')).data;assert.equal(again.state.planners[0].tasks[0].title,'Saved through API');assert.equal(again.state.planners[0].tasks[0].projectId,project.id);assert.deepEqual(again.state.planners[0].projects,[project]);assert.equal(again.state.planners[0].boardGrouped,true);assert.deepEqual(again.state.planners[0].notifications.forms,p.notifications.forms);assert.equal((await fetch(url+'/data/store.json')).status,404);assert.equal((await fetch(url+'/reports/%2e%2e%2fdata%2fstore.json')).status,400);
   assert.equal((await fs.readdir(backupDir)).filter(name=>name.startsWith('store.before-message-forms-')).length,1);
   assert.equal(again.state.planners[0].notifications.exportFolder,custom);
+
+  const current=again.state.planners[0],baseline=clone(current.notifications),edited=clone(baseline);
+  edited.teamsUrl='https://example.invalid/mock-teams';
+  edited.outlookUrl='https://example.invalid/mock-outlook';
+  edited.export=true;
+  edited.rows[0].reviewRequired=false;
+  edited.forms[0].sections=[newSection()];
+  const action=data=>req('/api/action','POST',{planner:current.id,...data});
+  const settingsSaved=await action({action:'notification-save',baseline,notifications:edited,test:{channel:'teams',row:edited.rows[0].id}});
+  assert.equal(settingsSaved.status,200);
+  assert.equal(settingsSaved.data.previousRevision,again.revision);
+  assert.ok(settingsSaved.data.ticket);
+  assert.equal(settingsSaved.data.state,undefined);
+  const sending=action({action:'notification-test',ticket:settingsSaved.data.ticket});
+  sending.catch(()=>{});
+  for(let attempt=0;attempt<100&&!await fs.stat(sentFile).then(()=>true,()=>false);attempt++)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.ok((await fs.stat(sentFile)).isFile());
+  const duringSend=(await req('/api/state')).data;
+  assert.equal(duringSend.state.planners[0].notifications.teamsUrl,edited.teamsUrl);
+  duringSend.state.planners[0].tasks[0].title='Task edit while notification waits';
+  assert.equal((await req('/api/state','PUT',duringSend)).status,200);
+  await fs.writeFile(releaseFile,'');
+  const sent=await sending;
+  assert.equal(sent.status,200);
+  assert.equal(sent.data.state,undefined);
+  assert.equal(sent.data.revision,undefined);
+  const sentPayload=await fs.readFile(sentFile,'utf8');
+  assert.match(sentPayload,/Saved through API/);
+  assert.doesNotMatch(sentPayload,/Task edit while notification waits/);
+  assert.equal((await action({action:'notification-test',ticket:settingsSaved.data.ticket})).status,400);
+  const newSettings={...edited,export:false};
+  const second=await action({action:'notification-save',baseline:edited,notifications:newSettings,test:{channel:'outlook',row:edited.rows[0].id}});
+  assert.equal(second.status,200);
+  const deliveryFailure=await action({action:'notification-test',ticket:second.data.ticket});
+  assert.equal(deliveryFailure.status,502);
+  assert.match(deliveryFailure.data.error,/설정 저장 완료 · 테스트 전송 실패/);
+  assert.equal(deliveryFailure.data.state,undefined);
+  const conflict=await action({action:'notification-save',baseline:edited,notifications:{...edited,export:true}});
+  assert.equal(conflict.status,409);
+  assert.deepEqual(conflict.data.notifications,newSettings);
+  const final=(await req('/api/state')).data;
+  assert.equal(final.state.planners[0].tasks[0].title,'Task edit while notification waits');
+  assert.equal(final.state.planners[0].notifications.export,false);
  }finally{await stop();for(const dir of ['data','reports','backups']){const target=path.resolve(base,dir,instance);assert.ok(target.startsWith(base+path.sep)&&target.includes(instance));await fs.rm(target,{recursive:true,force:true});}}
 });
