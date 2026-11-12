@@ -138,22 +138,29 @@ function projectsView(p){
   }).join('')}</div>`;
   const projects=p.projects.filter(project=>!!project.closed===showClosedProjects);
   if(!projects.length)return tabs+empty(showClosedProjects?'완료된 목표가 없습니다.':p.projects.length?'진행 중인 목표가 없습니다.':'목표를 만들어 관련 Task를 한곳에서 관리하세요.');
+  const today=day();
+  const year=today.slice(0,4);
+  const dateText=date=>date?`<time datetime="${esc(date)}">${esc(date.startsWith(year)?date.slice(5).replace('-','/'):date)}</time>`:'—';
   const dockedProject=wideProjectView.matches&&projects.find(project=>project.id===projectPreview?.id);
   const cards=`<div class="project-grid${dockedProject?' project-grid-compact':''}">${projects.map(project=>{
-    const s=projectStats(p.tasks.filter(t=>t.projectId===project.id),day(),project.due);
+    const s=projectStats(p.tasks.filter(t=>t.projectId===project.id),today,project.due);
+    const label=project.labelId&&chips(p,[project.labelId]);
     const selected=project.id===dockedProject?.id;
     const previewAttrs=wideProjectView.matches
-      ? (selected?'aria-current="true" aria-controls="project-preview"':'')
+      ? `aria-expanded="${selected}"${selected?' aria-current="true" aria-controls="project-preview"':''}`
       : 'aria-haspopup="dialog"';
     return `<article class="panel project-panel${selected?' project-panel-selected':''}">
-      <div class="project-panel-title"><h2>${btn('project-preview',esc(project.name)+icon('arrow'),{id:project.id,cls:'project-preview-trigger',extra:previewAttrs})}</h2><span class="project-badge">${project.closed?'완료':s.total&&s.done===s.total?'완료 가능':'진행 중'}</span></div>
-      ${project.labelId?`<div class="chips project-label">${chips(p,[project.labelId])}</div>`:''}
-      ${!dockedProject&&project.description?`<p class="muted">${esc(project.description)}</p>`:''}
-      <div class="project-metrics"><b>${progressText(s)}</b><span class="${s.overdue?'overdue':''}">기한 초과 ${s.overdue}</span>${dockedProject?'':`<span>다음 기한 ${s.nextDue||'—'}</span>`}</div>
-      ${project.completed?`<p class="muted">완료일 ${project.completed}</p>`:''}
-      ${dockedProject?'':`<progress max="${s.total||1}" value="${s.done}" aria-label="${progressText(s)}"></progress>
-      <p class="muted">일정 ${project.start||'—'} ~ ${project.due||'—'}</p>`}
-      <div class="row-actions">${btn('project-open','보드 열기',{id:project.id,cls:'primary'})}${btn('project-edit','편집',{id:project.id})}${btn('project-close',project.closed?'재개':'완료',{id:project.id})}${ib('project-delete','trash','목표 삭제',project.id)}</div>
+      <div class="project-panel-title"><h2>${btn('project-preview',esc(project.name)+icon('arrow'),{id:project.id,cls:'project-preview-trigger',extra:previewAttrs})}</h2><span class="project-badge">${project.closed?'완료':'진행 중'}</span></div>
+      ${label||project.description?`<div class="project-meta">
+        ${label?`<div class="chips project-label">${label}</div>`:''}
+        ${project.description?`<p class="muted project-description">${esc(project.description)}</p>`:''}
+      </div>`:''}
+      <div class="project-metrics"><b>${progressText(s)}</b><span class="${s.overdue?'overdue':''}">기한 초과 ${s.overdue}</span><span>다음 기한 ${dateText(s.nextDue)}</span>${project.completed?`<span class="muted">완료일 ${dateText(project.completed)}</span>`:''}</div>
+      <progress max="${s.total||1}" value="${s.done}" aria-label="${progressText(s)}"></progress>
+      <div class="project-panel-footer">
+        <p class="muted">일정 ${dateText(project.start)} ~ ${dateText(project.due)}</p>
+        <div class="row-actions">${btn('project-open','보드 열기',{id:project.id,cls:'primary'})}${btn('project-edit','편집',{id:project.id})}${btn('project-close',project.closed?'재개':'완료',{id:project.id})}${ib('project-delete','trash','목표 삭제',project.id)}</div>
+      </div>
     </article>`;
   }).join('')}</div>`;
   if(!dockedProject)return tabs+cards;
@@ -232,6 +239,7 @@ function projectPreviewPanel(p,project,docked){
         ${ib('project-preview-close','close','미리보기 닫기')}
       </div>
       <div class="project-metrics"><b>${progressText(stats)}</b><span class="${stats.overdue?'overdue':''}">기한 초과 ${stats.overdue}</span></div>
+      <progress max="${stats.total||1}" value="${stats.done}" aria-label="${progressText(stats)}"></progress>
       <div class="project-preview-actions">
         ${btn('project-open','보드 열기',{id:project.id,cls:'primary'})}
         <button type="button" id="project-task-add" popovertarget="project-task-dropdown">${icon('plus')}Task 추가</button>
