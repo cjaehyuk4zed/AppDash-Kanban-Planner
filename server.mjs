@@ -76,6 +76,7 @@ function validateState(s){
     const f=p.filters;if(!['all','none'].includes(f.project)&&!projectIds.has(f.project))fail();if(!['all',...p.buckets.map(b=>b.id)].includes(f.bucket)||!['all','상','중','하'].includes(f.priority)||!['all','overdue','today','week','none'].includes(f.due)||!['all','complete','incomplete'].includes(f.status)||!isString(f.from,10)||!isString(f.to,10)||parseDate(f.from)!==f.from||parseDate(f.to)!==f.to||f.labels.some(id=>!p.labels.some(l=>l.id===id)))fail();
     const colorSet=c=>Array.isArray(c)&&c.length===4&&c.every(c=>typeof c==='string'&&/^#[a-f0-9]{6}([a-f0-9]{2})?$/i.test(c));
     if(p.appearance.custom.some(c=>!isString(c.name,80)||!colorSet(c.colors))||!['none','move','label','delete'].includes(p.completion.action)||typeof p.calendarCompleted!=='boolean'||![7,14,28].includes(p.timelineMode))fail();
+    if(p.timelineCompleted!==undefined&&typeof p.timelineCompleted!=='boolean')fail();
   }
   return s;
 }
