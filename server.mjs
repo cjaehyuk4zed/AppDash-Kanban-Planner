@@ -77,6 +77,7 @@ function validateState(s){
     const colorSet=c=>Array.isArray(c)&&c.length===4&&c.every(c=>typeof c==='string'&&/^#[a-f0-9]{6}([a-f0-9]{2})?$/i.test(c));
     if(p.appearance.custom.some(c=>!isString(c.name,80)||!colorSet(c.colors))||!['none','move','label','delete'].includes(p.completion.action)||typeof p.calendarCompleted!=='boolean'||![7,14,28].includes(p.timelineMode))fail();
     if(p.timelineCompleted!==undefined&&typeof p.timelineCompleted!=='boolean')fail();
+    if(p.listCompleted!==undefined&&typeof p.listCompleted!=='boolean')fail();
   }
   return s;
 }
@@ -156,6 +157,13 @@ async function saveWorkspacePart(input){
   return {previousRevision,revision:store.revision,version:id?plannerVersion(id):store.uiVersion};
 }
 const notificationTests=new Map();
+function makeNotificationTest(planner,notifications,{row,channel}){
+  const schedule=notifications.rows.find(item=>item.id===row);
+  if(!['teams','outlook'].includes(channel)||!schedule)throw Error('테스트할 채널과 예약 시간을 선택하세요.');
+  if(schedule.reviewRequired)throw Error('메시지 양식의 검토를 완료한 뒤 테스트 전송하세요.');
+  if(!notifications[channel+'Url'])throw Error('연결 주소를 입력하세요.');
+  return {planner:clone(planner),notifications,row,channel};
+}
 async function saveNotifications(input){
   const planner=store.state.planners.find(item=>item.id===input.planner&&!item.deletedAt);
   if(!planner)throw Error('Planner를 찾을 수 없습니다.');
@@ -166,13 +174,7 @@ async function saveNotifications(input){
     throw error;
   }
   const notifications=validateNotifications(input.notifications);
-  const test=input.test;
-  if(test){
-    const row=notifications.rows.find(item=>item.id===test.row);
-    if(!['teams','outlook'].includes(test.channel)||!row)throw Error('테스트할 채널과 예약 시간을 선택하세요.');
-    if(row.reviewRequired)throw Error('양식을 검토하고 저장한 뒤 테스트 전송하세요.');
-    if(!notifications[test.channel+'Url'])throw Error('연결 주소를 입력하세요.');
-  }
+  const test=input.test&&makeNotificationTest(planner,notifications,input.test);
   const previousRevision=store.revision;
   const previousVersion=plannerVersion(planner.id);
   if(!isDeepStrictEqual(notifications,planner.notifications)){
@@ -184,7 +186,7 @@ async function saveNotifications(input){
   const result={previousRevision,previousVersion,revision:store.revision,version:plannerVersion(planner.id),savedAt:store.runtime.observedAt,pendingReports:pendingReports(store)};
   if(test){
     const ticket=crypto.randomUUID();
-    notificationTests.set(ticket,{planner:clone(planner),notifications,row:test.row,channel:test.channel});
+    notificationTests.set(ticket,test);
     setTimeout(()=>notificationTests.delete(ticket),60_000).unref();
     result.ticket=ticket;
   }
@@ -249,7 +251,7 @@ async function backupAction(input,json,res){
     return json({revision:store.revision});
   });
 }
-const mime={'.html':'text/html; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.txt':'text/plain; charset=utf-8'};
+const mime={'.html':'text/html; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.webmanifest':'application/manifest+json; charset=utf-8','.txt':'text/plain; charset=utf-8'};
 const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('Cache-Control','no-store');
   res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
@@ -259,7 +261,7 @@ const server=http.createServer(async(req,res)=>{
     const url=new URL(req.url,`http://127.0.0.1:${PORT}`),route=url.pathname;
     if(req.method!=='GET'&&(!['http://127.0.0.1:'+PORT,'http://localhost:'+PORT].includes(req.headers.origin)||!req.headers['content-type']?.startsWith('application/json')))return json({error:'같은 앱 화면에서 JSON 요청을 사용하세요.'},403);
     if(!store)return json({ready:false,error:'저장소를 준비하고 있습니다.'},503);
-    if(route==='/api/ready'&&req.method==='GET')return json({ready:true,name:'Kanban Planner (Beta)'});
+    if(route==='/api/ready'&&req.method==='GET')return json({ready:true,name:'Kanban Planner'});
     if(route==='/api/state'&&req.method==='GET')return await exclusive(async()=>{const next=clone(store);purge(next.state);if(next.state.planners.length!==store.state.planners.length){next.revision++;updateVersions(next);await persist(next);store=next;}json({state:store.state,revision:store.revision,plannerVersions:Object.fromEntries(store.state.planners.map(p=>[p.id,plannerVersion(p.id)])),uiVersion:store.uiVersion??store.revision,status:{projects:true,projectLabels:true,backups:true,savedAt:store.runtime.observedAt,pending:store.runtime.pending.length,pendingReports:pendingReports(store),delivery:Object.entries(store.runtime.delivery).slice(-30).map(([key,v])=>({key,...v})),reportPath:REPORTS,nativeFolderPicker:process.platform==='win32'}});});
     if(route==='/api/planner'&&req.method==='PUT'){const b=await body(req);return await exclusive(async()=>json(await saveWorkspacePart(b)));}
     if(route==='/api/backup'&&req.method==='POST')return await backupAction(await body(req,BACKUP_LIMIT+1024),json,res);
@@ -268,12 +270,22 @@ const server=http.createServer(async(req,res)=>{
       const b=await body(req);
       if(b.action==='notification-save')return await exclusive(async()=>json(await saveNotifications(b)));
       if(b.action==='notification-test'){
-        const test=notificationTests.get(b.ticket);
-        if(!test)throw Error('테스트 요청이 만료되었습니다. 다시 시도하세요.');
-        notificationTests.delete(b.ticket);
+        const legacy=Object.hasOwn(b,'ticket');
+        let test;
+        if(legacy){
+          test=notificationTests.get(b.ticket);
+          if(!test)throw Error('테스트 요청이 만료되었습니다. 다시 시도하세요.');
+          notificationTests.delete(b.ticket);
+        }else{
+          test=await exclusive(async()=>{
+            const planner=store.state.planners.find(p=>p.id===b.planner&&!p.deletedAt);
+            if(!planner)throw Error('Planner를 찾을 수 없습니다.');
+            return makeNotificationTest(planner,validateNotifications(b.notifications),b);
+          });
+        }
         try{await deliver(test.planner,test.notifications,test.row,test.channel);}
-        catch(error){return json({error:`설정 저장 완료 · 테스트 전송 실패. ${error.message}`},502);}
-        return json({text:'설정 저장 및 테스트 전송 완료'});
+        catch(error){return json({error:`${legacy?'설정 저장 완료 · ':''}테스트 전송 실패. ${error.message}`},502);}
+        return json({text:legacy?'설정 저장 및 테스트 전송 완료':'테스트 전송 완료'});
       }
       if(['connection-test','folder-test','folder-pick'].includes(b.action)){
         if(!store.state.planners.some(p=>p.id===b.planner&&!p.deletedAt))throw Error('Planner를 찾을 수 없습니다.');
@@ -315,7 +327,7 @@ const server=http.createServer(async(req,res)=>{
     if(req.method!=='GET')return json({error:'지원하지 않는 요청'},405);
     let file;
     if(route.startsWith('/reports/')){const name=decodeURIComponent(route.slice(9));if(!/^[a-zA-Z0-9_-]+\.txt$/.test(name))return json({error:'잘못된 파일 이름'},400);file=path.join(REPORTS,name);res.setHeader('Content-Disposition',`attachment; filename="${name}"`);}
-    else{const files={'/':'index.html','/app.mjs':'app.mjs','/model.mjs':'model.mjs','/styles.css':'styles.css','/icon.svg':'icon.svg'};if(!files[route])return json({error:'찾을 수 없습니다.'},404);file=path.join(BASE,'public',files[route]);}
+    else{const files={'/':'index.html','/app.mjs':'app.mjs','/model.mjs':'model.mjs','/styles.css':'styles.css','/icon.svg':'icon.svg','/manifest.webmanifest':'manifest.webmanifest','/icon-44.png':'icon-44.png','/icon-192.png':'icon-192.png','/icon-512.png':'icon-512.png'};if(!files[route])return json({error:'찾을 수 없습니다.'},404);file=path.join(BASE,'public',files[route]);}
     try{const data=await fs.readFile(file);res.writeHead(200,{'Content-Type':mime[path.extname(file)]});res.end(data);}catch(e){if(e.code==='ENOENT')return json({error:'파일을 찾을 수 없습니다.'},404);throw e;}
   }catch(e){if(!res.headersSent)json({error:e.message?.startsWith('ENOENT')?'파일 작업에 실패했습니다.':e.message||'처리에 실패했습니다.',...(e.notifications&&{notifications:e.notifications})},e.status||400);else res.end();}
 });
@@ -352,6 +364,6 @@ const timer=setInterval(()=>{
     await tick(store,{now:observedAt,writeReport,enqueueNotification:scheduledNotifications.enqueue,checkpoint:()=>persist(store)});
   }).catch(()=>console.error('예약 상태 저장 실패. data/reports 권한을 확인하세요.'));
 },30000);
-console.log(`Kanban Planner (Beta) http://127.0.0.1:${PORT}\n저장: ${DATA}\n보고서: ${REPORTS}\n종료: Ctrl+C 또는 AppDash 중지`);
+console.log(`Kanban Planner http://127.0.0.1:${PORT}\n저장: ${DATA}\n보고서: ${REPORTS}\n종료: Ctrl+C 또는 AppDash 중지`);
 async function stop(){clearInterval(timer);server.close();server.closeIdleConnections();await scheduledNotifications.close();await queue;process.exit(0);}
 process.on('SIGINT',stop);process.on('SIGTERM',stop);

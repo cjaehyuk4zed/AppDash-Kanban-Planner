@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url';
 const base=path.dirname(fileURLToPath(new URL('../server.mjs',import.meta.url)));
 const file=path.join(base,'appdash-gateway-config.json');
 const config={
-  name:'Kanban Planner (Beta)',
+  name:'Kanban Planner',
   description:'한국어 Kanban Planner · 보드, 일정, 타임라인, 통계, 알림과 예약 보고서',
   type:'service',
   group:'Productivity',

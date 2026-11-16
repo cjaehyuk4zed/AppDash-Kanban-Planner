@@ -11,8 +11,8 @@ const field=(label,control,cls='')=>`<label class="field ${cls}"><span>${label}<
 const input=(attr,value='',type='text')=>`<input type="${type}" ${attr} value="${esc(value)}">`;
 const check=(attr,value,label)=>`<label class="check"><input type="checkbox" ${attr} ${value?'checked':''}><span>${label}</span></label>`;
 const empty=text=>`<div class="empty">${text}</div>`;
-const menus=[['projects','goal','목표','목표 진행과 일정'],['board','board','보드','버킷별 작업 흐름'],['calendar','calendar','일정','시작 날짜와 기한 기준 캘린더'],['timeline','timeline','타임라인','Task 기간과 진행 상태 Gantt'],['chart','chart','차트','완료, 버킷, 우선순위 통계'],['list','list','전체','모든 Task 조회와 빠른 완료 처리'],['settings','settings','설정','완료 액션, 버킷, 레이블 관리']];
-let state,revision,status,selected=null,view='home',trash=false,modal=null,pop=null,task=null,notificationDrafts=new Map(),formSelection=new Map(),rowSelection=new Map(),saveChain=Promise.resolve(),saveError='',saving=0,busyActions=0;
+const menus=[['projects','goal','목표','목표 진행과 일정'],['board','board','보드','버킷별 작업 흐름'],['calendar','calendar','일정','시작일과 기한 기준 캘린더'],['timeline','timeline','타임라인','Task 기간과 진행 상태 Gantt'],['chart','chart','차트','완료, 버킷, 우선순위 통계'],['list','list','전체','모든 Task 조회와 빠른 완료 처리'],['settings','settings','설정','완료 액션, 버킷, 레이블 관리']];
+let state,revision,status,selected=null,view='home',trash=false,modal=null,pop=null,task=null,notificationDrafts=new Map(),completionDrafts=new Map(),completionWrites=new Map(),formSelection=new Map(),rowSelection=new Map(),saveChain=Promise.resolve(),saveError='',saving=0,autoSaving=0,busyActions=0;
 let month=day().slice(0,7),timelineStart=addDays(day(),-3),suppressClick=0,drag=null,taskDateBaseline=null,dateValidationErrors=[];
 const collapsedProjects=new Set();
 const wideProjectView=matchMedia('(min-width: 1100px)');
@@ -38,18 +38,19 @@ function acknowledgeSave(result){
   if(result.previousRevision===revision)revision=result.revision;
   status.savedAt=result.savedAt??new Date().toISOString();
 }
-function enqueueSave(operation,{keepError=false}={}){
+function enqueueSave(operation,{keepError=false,autoSave=false}={}){
   saving++;
+  if(autoSave)autoSaving++;
   storageLabel();
   const run=saveChain.then(async()=>{
     if(saveError)throw Error(saveError);
     return operation();
   });
-  saveChain=run.catch(error=>{if(keepError)saveError=error.message;}).finally(()=>{saving--;storageLabel();});
+  saveChain=run.catch(error=>{if(keepError)saveError=error.message;}).finally(()=>{saving--;if(autoSave)autoSaving--;storageLabel();});
   return run;
 }
 function persist(message='저장 완료'){
-  const snapshot=clone(state);
+  const snapshot=clone(state),completionVersions=new Map(completionWrites);
   return enqueueSave(async()=>{
     if(JSON.stringify(snapshot.ui)!==JSON.stringify(savedState.ui)){
       const result=await api('/api/planner','PUT',{ui:snapshot.ui,version:uiVersion});
@@ -62,7 +63,13 @@ function persist(message='저장 완료'){
       const index=committed.get(planner.id);
       const previous=savedState.planners[index];
       // A Task edit can have been queued before the notifications were saved.
-      if(previous)planner.notifications=previous.notifications;
+      if(previous){
+        planner.notifications=previous.notifications;
+        // Keep an acknowledged completion rule when this save was queued before it was applied.
+        if(completionVersions.get(planner.id)!==completionWrites.get(planner.id)){
+          planner.completion=completionAfterCatalogChanges(previous,planner);
+        }
+      }
       if(previous&&JSON.stringify(planner)===JSON.stringify(previous))continue;
       const result=await api('/api/planner','PUT',{planner,version:plannerVersions.get(planner.id)??null});
       if(previous)savedState.planners[index]=planner;
@@ -71,9 +78,35 @@ function persist(message='저장 완료'){
       acknowledgeSave(result);
     }
     if(message)notify(message);
-  },{keepError:true}).catch(error=>{notify(error.message,true);throw error;});
+  },{keepError:true,autoSave:true}).catch(error=>{notify(error.message,true);throw error;});
 }
-function storageLabel(){const el=$('#save-state');if(el)el.textContent=saveError?'저장 실패 · 입력 유지':saving?'저장 중…':'모든 변경 저장됨';const detail=$('#storage-detail');if(detail)detail.textContent=saveError||`단일 base 내부에 저장됨 · 마지막 저장 ${new Date(status.savedAt).toLocaleString('ko-KR')}`;}
+function hasSettingsDrafts(){
+  return state?.planners.some(p=>!p.deletedAt&&[completionDrafts,notificationDrafts].some(map=>{
+    const edit=map.get(p.id);
+    return edit&&!sameSettings(edit.value,edit.baseline);
+  }));
+}
+function storageLabel(){
+  const sidebar=$('#save-state');
+  if(sidebar)sidebar.textContent=saveError?'저장 실패 · 입력 유지':saving?'저장 중…':hasSettingsDrafts()?'적용 전 변경사항':'모든 변경 저장됨';
+  const general=$('#general-save-state');
+  if(general)general.textContent=saveError?'저장 실패':autoSaving?'저장 중…':'저장됨';
+  const detail=$('#storage-detail');
+  if(detail)detail.textContent=saveError||`단일 base 내부에 저장됨 · 마지막 저장 ${new Date(status.savedAt).toLocaleString('ko-KR')}`;
+  if(view==='settings')updateSettingsApplyState(planner());
+}
+function updateSettingsApplyState(p){
+  if(!p)return;
+  for(const [key,edit,applied,action] of [
+    ['completion',completionEdit(p),p.completion,'completion-apply'],
+    ['notification',notificationEdit(p),p.notifications,'notification-save']
+  ]){
+    const dirty=!sameSettings(edit.value,edit.baseline), conflict=!sameSettings(edit.baseline,applied);
+    const label=$(`#${key}-apply-state`),button=$(`[data-action="${action}"]`);
+    if(label)label.textContent=edit.applying?'적용 중…':conflict?'다른 화면에서 설정 변경됨':edit.error|| (dirty?'적용 전 변경사항':'적용됨');
+    if(button)button.disabled=!dirty||conflict||!!edit.applying;
+  }
+}
 function render(){
   hideOutput();
   rememberProjectPreview();
@@ -83,8 +116,8 @@ function render(){
   const colors=p?.appearance.colors||palettes[0].colors;
   ['--site','--sidebar','--bucket','--popup'].forEach((key,i)=>document.documentElement.style.setProperty(key,colors[i]));document.documentElement.style.setProperty('--bucket-width',`${p?.appearance.width||340}px`);
   const count=state.planners.filter(p=>!p.deletedAt).length,current=menus.find(x=>x[0]===view);
-  $('#app').innerHTML=`<aside class="sidebar ${state.ui.collapsed?'collapsed':''}"><div class="sidebar-top">${ib('collapse','collapse','사이드바 확장·축소')}<span class="beta">BETA</span></div><button class="brand" data-action="home" title="Planner 홈"><img src="/icon.svg" alt=""><span><strong>${esc(p?.name||'Kanban Planner')}</strong><small>${esc(p?.description||'Kanban planner')}</small></span></button><div class="workspace-label">WORKSPACE</div><nav>${btn('home',`${icon('home')}<span>내 Planner</span><b>${count}</b>`,{cls:view==='home'?'active':'',title:'내 Planner'})}${view==='home'?'':`<div class="nav-divider"></div>${menus.filter(([id])=>id!=='projects'||status.projects).map(([id,ic,name])=>btn('nav',`${icon(ic)}<span>${name}</span>`,{id,cls:view===id?'active':'',title:name})).join('')}`}</nav><div class="sidebar-bottom"><span class="status-dot"></span><span id="save-state"></span><small>LOCAL WORKSPACE</small></div></aside>
-  <main><header><div><div class="eyebrow">${view==='home'?'YOUR PERSONAL WORKSPACE':esc(p.name)}</div><h1>${view==='home'?'Planner':current[2]}</h1><p>${view==='home'?(trash?'30일 보관':'워크스페이스'):current[3]}</p></div><div class="toolbar">${view==='home'?(trash?'':btn('planner-new',icon('plus')+'새 Planner',{cls:'primary'})):view==='projects'?btn('project-new',icon('plus')+'새 목표',{cls:'primary'}):view==='settings'?'':`${btn('sort',icon('sort')+'정렬',{cls:p.sort!=='manual'?'selected':''})}${btn('filter',icon('filter')+'필터'+(filtersActive(p)?'<i class="active-dot"></i>':''),{cls:filtersActive(p)?'selected':''})}${view==='board'?btn('bucket-new',icon('plus')+'버킷'):''}${btn('task-new',icon('plus')+'Task',{cls:'primary'})}`}</div></header><section id="content" class="content ${view}">${p&&view!=='projects'&&view!=='home'&&view!=='settings'?activeFilterChips(p):''}${view==='home'?home()+(count?'':backupPanel()):view==='projects'?projectsView(p):view==='board'?board(p):view==='calendar'?calendar(p):view==='timeline'?timeline(p):view==='chart'?charts(p):view==='list'?table(p):settings(p)}</section><footer><span>Kanban Planner <b>Beta</b></span><span>생각을 정리하고, 다음으로 나아가세요.</span></footer></main>`;
+  $('#app').innerHTML=`<aside class="sidebar ${state.ui.collapsed?'collapsed':''}"><div class="sidebar-top">${ib('collapse','collapse','사이드바 확장·축소')}</div><button class="brand" data-action="home" title="Planner 홈"><img src="/icon.svg" alt=""><span><strong>${esc(p?.name||'Kanban Planner')}</strong><small>${esc(p?.description||'Kanban planner')}</small></span></button><div class="workspace-label">WORKSPACE</div><nav>${btn('home',`${icon('home')}<span>내 Planner</span><b>${count}</b>`,{cls:view==='home'?'active':'',title:'내 Planner'})}${view==='home'?'':`<div class="nav-divider"></div>${menus.filter(([id])=>id!=='projects'||status.projects).map(([id,ic,name])=>btn('nav',`${icon(ic)}<span>${name}</span>`,{id,cls:view===id?'active':'',title:name})).join('')}`}</nav><div class="sidebar-bottom"><span class="status-dot"></span><span id="save-state"></span><small>LOCAL WORKSPACE</small></div></aside>
+  <main><header><div><div class="eyebrow">${view==='home'?'YOUR PERSONAL WORKSPACE':esc(p.name)}</div><h1>${view==='home'?'Planner':current[2]}</h1><p>${view==='home'?(trash?'30일 보관':'워크스페이스'):current[3]}</p></div><div class="toolbar">${view==='home'?(trash?'':btn('planner-new',icon('plus')+'새 Planner',{cls:'primary'})):view==='projects'?btn('project-new',icon('plus')+'새 목표',{cls:'primary'}):view==='settings'?'':`${btn('sort',icon('sort')+'정렬',{cls:p.sort!=='manual'?'selected':''})}${btn('filter',icon('filter')+'필터'+(filtersActive(p)?'<i class="active-dot"></i>':''),{cls:filtersActive(p)?'selected':''})}${view==='board'?btn('bucket-new',icon('plus')+'버킷'):''}${btn('task-new',icon('plus')+'Task',{cls:'primary'})}`}</div></header><section id="content" class="content ${view}">${p&&view!=='projects'&&view!=='home'&&view!=='settings'?activeFilterChips(p):''}${view==='home'?home()+(count?'':backupPanel()):view==='projects'?projectsView(p):view==='board'?board(p):view==='calendar'?calendar(p):view==='timeline'?timeline(p):view==='chart'?charts(p):view==='list'?table(p):settings(p)}</section><footer><span>Kanban Planner</span><span>생각을 정리하고, 다음으로 나아가세요.</span></footer></main>`;
   syncProjectPreview(p);
   storageLabel();if(pop)renderPopover();
 }
@@ -94,7 +127,26 @@ function filtersActive(p){const f=p.filters;return ['bucket','priority','due','s
 function home(){const list=state.planners.filter(p=>trash?!!p.deletedAt:!p.deletedAt);return `<div class="home-heading"><div class="tabs">${btn('home-normal','내 Planner',{cls:!trash?'active':''})}${btn('home-trash',`휴지통 <span class="count">${state.planners.filter(p=>p.deletedAt).length}</span>`,{cls:trash?'active':''})}</div><span class="muted">${list.length}개의 Planner</span></div>${list.length?`<div class="planner-list">${list.map(p=>`<article class="planner-row"><div class="planner-mark">${icon(trash?'trash':'board')}</div>${trash?`<div class="planner-title"><strong>${esc(p.name)}</strong><small>${esc(p.description)}</small></div><div class="retention"><b>${Math.max(0,Math.ceil((Date.parse(p.deletedAt)+30*86400000-Date.now())/86400000))}일 남음</b><small>${day(new Date(Date.parse(p.deletedAt)+30*86400000))} 영구 삭제 예정</small></div>${ib('planner-restore','restore','Planner 복원',p.id)}`:`<button class="planner-title" data-action="planner-open" data-id="${p.id}"><strong>${esc(p.name)}</strong><small>${esc(p.description)||'설명 없음'}</small></button><div class="planner-count"><b>${p.tasks.length}</b><small>전체 Task</small></div><div class="planner-count"><b>${p.tasks.filter(t=>!t.completed).length}</b><small>미완료</small></div><div class="row-actions">${ib('planner-edit','edit','Planner 편집',p.id)}${ib('planner-delete','trash','Planner 삭제',p.id)}</div>${ib('planner-open','arrow','Planner 열기',p.id)}`}</article>`).join('')}</div>`:empty(trash?'휴지통이 비어 있습니다.':'Planner가 없습니다. 새 Planner를 만들어 시작하세요.')}<div class="home-note"><span class="status-dot"></span>모든 작업은 이 PC의 단일 base 안에 보관됩니다.</div>`;}
 function chips(p,ids){return ids.map(id=>{const l=p.labels.find(x=>x.id===id);return l?`<span class="chip" data-label-id="${id}" style="--label:${l.color}"><i></i>${esc(labelName(p,id))}</span>`:'';}).join('');}
 const completion=(p,t)=>btn('task-toggle',t.completed?icon('check'):'',{id:t.id,cls:`completion ${t.completed?'done':''}`,title:t.completed?'미완료로 변경':'Task 완료'});
-function card(p,t){const labels=taskLabels(p,t),due=taskDue(p,t);return `<article class="task-card ${t.completed?'completed':''}" data-task="${t.id}" tabindex="0" role="button" aria-label="Task 편집: ${esc(t.title)}"><div class="card-title">${completion(p,t)}<strong>${esc(t.title)}</strong></div>${t.projectId?`<span class="project-badge">${esc(projectName(p,t.projectId))}</span>`:''}${t.showChecklist?`<div class="card-checklist">${t.checklist.filter(c=>!c.done&&c.text.trim()).map(c=>btn('card-check',`<span class="mini-check"></span>${esc(c.text)}`,{id:t.id,extra:`data-check="${c.id}"`})).join('')}</div>`:''}${t.showNotes&&t.notes.trim()?`<p class="note-preview">${esc(t.notes.trim())}</p>`:''}${labels.length?`<div class="chips">${chips(p,labels)}</div>`:''}<div class="card-meta"><span class="priority p${rank(t.priority)}"><i></i>${esc(t.priority)}</span>${due?`<span class="${!t.completed&&due<day()?'overdue':!t.completed&&due===day()?'due-today':''}">${icon('calendar')}기한 ${due}</span>`:''}${t.checklist.length?`<span>${icon('check')}${t.checklist.filter(c=>c.done).length}/${t.checklist.length}</span>`:''}${t.completed?`<span>완료 ${t.completed}</span>`:''}</div></article>`;}
+function card(p,t,showGoal){
+  const labels=taskLabels(p,t),due=taskDue(p,t);
+  const goal=showGoal&&t.projectId?projectName(p,t.projectId):'';
+  const dueClass=!t.completed&&due<day()?'overdue':!t.completed&&due===day()?'due-today':'';
+  return `<article class="task-card ${t.completed?'completed':''}" data-task="${t.id}" tabindex="0" role="button" aria-label="Task 편집: ${esc(t.title)}">
+    <div class="card-title">${completion(p,t)}<strong>${esc(t.title)}</strong></div>
+    ${t.showChecklist?`<div class="card-checklist">${t.checklist.filter(c=>!c.done&&c.text.trim()).map(c=>`<div class="card-checklist-row">${btn('card-check','<span class="mini-check"></span>',{id:t.id,extra:`data-check="${c.id}" aria-label="체크리스트 완료 ${esc(c.text)}"`})}<span>${esc(c.text)}</span></div>`).join('')}</div>`:''}
+    ${t.showNotes&&t.notes.trim()?`<p class="note-preview">${esc(t.notes.trim())}</p>`:''}
+    ${labels.length?`<div class="chips">${chips(p,labels)}</div>`:''}
+    <div class="card-meta">
+      <div class="card-meta-primary">
+        <span class="priority p${rank(t.priority)}"><i class="priority-mark" aria-hidden="true"></i>${esc(t.priority)}</span>
+        ${due?`<span class="${dueClass}">${icon('calendar')}<time datetime="${due}" title="${due}">기한 ${due.slice(5)}</time></span>`:''}
+        ${goal?`<span class="card-goal" title="${esc(goal)}">${icon('goal')}<span class="card-goal-name">${esc(goal)}</span></span>`:''}
+      </div>
+      ${t.checklist.length?`<span>${icon('check')}${t.checklist.filter(c=>c.done).length}/${t.checklist.length}</span>`:''}
+      ${t.completed?`<span>완료 ${t.completed}</span>`:''}
+    </div>
+  </article>`;
+}
 const projectOptions=(p,all=false,selected)=>[
   ...(all?[['all','전체 목표']]:[]),['none','목표 없음'],
   ...(p.projects??[]).map(x=>[x.id,x.name+(x.closed?' (완료)':'')]),
@@ -254,11 +306,12 @@ function projectPreviewPanel(p,project,docked){
     </section>`;
 }
 function boardTrack(p,items,group){
+  const showGoal=group===undefined&&p.filters.project==='all';
   const lane=group===undefined?'':`data-project="${group}"`;
   return `<div class="board-track">${p.buckets.filter(b=>p.filters.bucket==='all'||p.filters.bucket===b.id).map((b,i)=>{
     const tasks=sortTasks(p,items.filter(t=>t.bucket===b.id),b.sort||p.sort);
     const name=group===undefined?`<input class="bucket-name" data-bucket-name="${b.id}" aria-label="버킷명 ${esc(b.name)}" value="${esc(b.name)}" maxlength="160">`:`<strong class="lane-bucket-name">${esc(b.name)}</strong>`;
-    return `<section class="bucket" data-bucket="${b.id}" ${lane}><div class="bucket-header"><i class="bucket-dot" style="--dot:${['#8d9b96','#cba563','#8d92ad','#659682'][i%4]}"></i>${name}<span class="count">${tasks.length}</span>${ib('bucket-sort','sort','버킷 정렬',b.id)}${group===undefined?ib('task-new','plus','이 버킷에 Task 추가',b.id)+ib('bucket-delete','trash','버킷 삭제',b.id,p.buckets.length===1):''}</div><div class="bucket-tasks" data-drop-bucket="${b.id}">${tasks.length?tasks.map(t=>card(p,t)).join(''):empty('아직 Task가 없습니다')}</div>${btn('task-new',icon('plus')+'Task 추가',{id:b.id,cls:'add-task',extra:lane})}</section>`;
+    return `<section class="bucket" data-bucket="${b.id}" ${lane}><div class="bucket-header"><i class="bucket-dot" style="--dot:${['#8d9b96','#cba563','#8d92ad','#659682'][i%4]}"></i>${name}<span class="count">${tasks.length}</span>${ib('bucket-sort','sort','버킷 정렬',b.id)}${group===undefined?ib('task-new','plus','이 버킷에 Task 추가',b.id)+ib('bucket-delete','trash','버킷 삭제',b.id,p.buckets.length===1):''}</div><div class="bucket-tasks" data-drop-bucket="${b.id}">${tasks.length?tasks.map(t=>card(p,t,showGoal)).join(''):empty('아직 Task가 없습니다')}</div>${btn('task-new',icon('plus')+'Task 추가',{id:b.id,cls:'add-task',extra:lane})}</section>`;
   }).join('')}</div>`;
 }
 function board(p){
@@ -307,28 +360,108 @@ function timeline(p){
   return `<div class="view-toolbar"><div class="timeline-range"><div class="segmented">${[7,14,28].map((n,i)=>btn('timeline-mode',['1-Week','2-Weeks','4-Weeks'][i],{id:String(n),cls:count===n?'active':''})).join('')}</div>${check('data-timeline-completed',showCompleted,'완료 목표/Task 표시')}</div><div class="period-nav">${[-7,-1].map((n,i)=>btn('timeline-shift',['«','‹'][i],{id:String(n),title:`이전 ${-n}일`})).join('')}<b>${timelineStart} ~ ${end}</b>${[1,7].map((n,i)=>btn('timeline-shift',['›','»'][i],{id:String(n),title:`다음 ${n}일`})).join('')}${btn('timeline-today','오늘')}</div></div><div class="timeline-scroll"><div class="timeline-grid" style="--timeline-width:${Math.max(700,count*58)}px"><div class="timeline-info timeline-head">${projects.length?'목표 / Task':'Task'}</div><div class="timeline-dates">${days.map(d=>`<div class="${d===day()?'today':''}"><small>${['일','월','화','수','목','금','토'][new Date(d+'T12:00:00').getDay()]}</small>${d.slice(5).replace('-','/')}</div>`).join('')}</div>${rows}</div></div>${!rows?empty(tasks.some(t=>t.start||taskDue(p,t))?'현재 기간에 표시할 Task 없음':'표시할 날짜가 있는 Task 없음'):''}${undated.length?`<section class="panel"><h3>날짜 없음 <span class="count">${undated.length}</span></h3><div class="undated">${undated.map(t=>btn('task-open',esc(t.title),{id:t.id})).join('')}</div></section>`:''}`;
 }
 function charts(p){const tasks=filtered(p),total=tasks.length,done=tasks.filter(t=>t.completed).length,overdue=tasks.filter(t=>!t.completed&&taskDue(p,t)&&taskDue(p,t)<day()).length,ratio=total?Math.round(done/total*100):0;const bars=items=>{const max=Math.max(1,...items.map(x=>x[1]));return `<div class="bars">${items.map(([name,n,color])=>`<div><span>${esc(name)}</span><div class="bar-track"><i style="width:${n/max*100}%;background:${color||'#6f9284'}"></i></div><b>${n}</b></div>`).join('')}</div>`;};return `<div class="stat-grid">${[['전체 Task',total],['완료',done],['미완료',total-done],['기한 초과',overdue]].map(([label,n],i)=>`<div class="stat"><span>${label}</span><strong class="${i===3&&n?'overdue':''}">${n}<small>Tasks</small></strong></div>`).join('')}</div><div class="chart-grid"><section class="panel"><h3>완료 상태</h3><div class="donut" style="--percent:${ratio}%"><div><strong>${ratio}%</strong><small>${done}/${total} 완료</small></div></div><p class="muted center">완료 <b>${done}</b> · 미완료 <b>${total-done}</b></p></section><section class="panel"><h3>버킷별 Task</h3>${bars(p.buckets.map(b=>[b.name,tasks.filter(t=>t.bucket===b.id).length]))}</section><section class="panel"><h3>우선순위별 Task</h3>${bars(['상','중','하'].map((x,i)=>[x,tasks.filter(t=>t.priority===x).length,['#b96b54','#c4aa6d','#7a9c8e'][i]]))}</section></div>`;}
-function table(p){const tasks=sortTasks(p,filtered(p));return `<div class="table-summary"><b>${tasks.length}</b>개의 Task<span class="muted">제목을 눌러 상세 내용을 편집하세요</span></div><div class="table-scroll"><table><thead><tr>${['Task',...(status.projects?['목표']:[]),'버킷','레이블','우선순위','시작','기한','완료'].map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${tasks.map(t=>`<tr class="${t.completed?'completed':''}"><td><div class="table-task">${completion(p,t)}${btn('task-open',esc(t.title),{id:t.id,cls:'text-button'})}</div></td>${status.projects?`<td>${esc(projectName(p,t.projectId))}</td>`:''}<td>${esc(bucketName(p,t.bucket))}</td><td><div class="chips">${chips(p,taskLabels(p,t))||'-'}</div></td><td><span class="priority p${rank(t.priority)}">${t.priority}</span></td><td>${t.start||'-'}</td><td class="${!t.completed&&taskDue(p,t)&&taskDue(p,t)<day()?'overdue':''}">${taskDue(p,t)||'-'}</td><td>${t.completed||'-'}</td></tr>`).join('')||'<tr><td colspan="'+(status.projects?8:7)+'">'+empty('조건에 맞는 Task가 없습니다.')+'</td></tr>'}</tbody></table></div>`;}
+function table(p){const showCompleted=p.listCompleted??true,tasks=sortTasks(p,filtered(p).filter(t=>showCompleted||!t.completed));return `<div class="view-toolbar">${check('data-list-completed',showCompleted,'완료 Task 표시')}</div><div class="table-summary"><b>${tasks.length}</b>개의 Task<span class="muted">제목을 눌러 상세 내용을 편집하세요</span></div><div class="table-scroll"><table><thead><tr>${['Task',...(status.projects?['목표']:[]),'버킷','레이블','우선순위','시작일','기한','완료'].map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${tasks.map(t=>`<tr class="${t.completed?'completed':''}"><td><div class="table-task">${completion(p,t)}${btn('task-open',esc(t.title),{id:t.id,cls:'text-button'})}</div></td>${status.projects?`<td>${esc(projectName(p,t.projectId))}</td>`:''}<td>${esc(bucketName(p,t.bucket))}</td><td><div class="chips">${chips(p,taskLabels(p,t))||'-'}</div></td><td><span class="priority p${rank(t.priority)}">${t.priority}</span></td><td>${t.start||'-'}</td><td class="${!t.completed&&taskDue(p,t)&&taskDue(p,t)<day()?'overdue':''}">${taskDue(p,t)||'-'}</td><td>${t.completed||'-'}</td></tr>`).join('')||'<tr><td colspan="'+(status.projects?8:7)+'">'+empty('조건에 맞는 Task가 없습니다.')+'</td></tr>'}</tbody></table></div>`;}
 
 function dateControl(attr,value,label='날짜'){return `<div class="date-control">${input(`${attr} placeholder="YYYY-MM-DD" aria-label="${label}" inputmode="numeric"`,value)}<label class="calendar-picker" title="${label} 달력 선택">${icon('calendar')}<input type="date" data-date-picker aria-label="${label} 달력" value="${/^\d{4}-\d{2}-\d{2}$/.test(value)?value:''}"></label></div>`;}
-function settings(p){return `<div class="settings-general"><div class="section-heading"><span class="eyebrow">MAKE IT YOURS</span><h2>일반 설정</h2></div><div class="general-grid"><section class="panel"><h3>Planner</h3><form data-form="planner-settings">${field('이름',input('name="name" maxlength="160"',p.name))}${field('설명',input('name="description" maxlength="300"',p.description))}<button class="primary">저장</button></form></section><section class="panel appearance"><h3>화면</h3><div class="width-setting">${field('버킷 가로 넓이',`<input type="range" data-width min="260" max="480" step="10" value="${p.appearance.width}">`)}${input('data-width-number min="260" max="480" step="10" aria-label="버킷 넓이 숫자"',p.appearance.width,'number')}<span>px</span>${btn('width-reset','초기화')}</div><div class="color-inputs">${['사이트 배경','사이드바','버킷 배경','Task 팝업'].map((name,i)=>field(name,input(`data-color="${i}" aria-label="${name}"`,p.appearance.colors[i].slice(0,7),'color'))).join('')}</div><p class="label-title">추천 색상 조합</p><div class="palette-list">${palettes.map((x,i)=>paletteButton(x,'palette',String(i))).join('')}</div><div class="subheading"><b>사용자 지정 조합</b>${btn('palette-add','현재 조합 추가')}</div><div class="palette-list">${p.appearance.custom.map((x,i)=>`<div class="custom-palette">${paletteButton(x,'palette-custom',String(i))}${ib('palette-delete','close','사용자 조합 삭제',String(i))}</div>`).join('')||'<span class="muted">저장된 조합 없음</span>'}</div>${btn('palette-reset','색상 초기화')}</section><section class="panel"><h3>완료 액션</h3><p class="muted">미완료 Task를 완료로 바꿀 때 적용합니다. 삭제는 Task를 영구 삭제합니다.</p><form data-form="completion">${field('동작',select('name="action" data-completion-action',[['none','없음'],['move','특정 버킷으로 이동'],['label','레이블 변경'],['delete','삭제']],p.completion.action))}<div id="completion-target">${completionTarget(p,p.completion.action)}</div><button class="primary">저장</button></form></section><section class="panel"><h3>버킷</h3><div class="management-list" data-bucket-manage>${p.buckets.map((b,i)=>`<div class="management-row" data-bucket-row="${b.id}"><span class="drag-handle" data-bucket-handle="${b.id}" tabindex="0" title="버킷 순서 이동">${icon('grip')}</span>${input(`data-manage-bucket="${b.id}" aria-label="버킷 이름 ${esc(b.name)}" maxlength="160"`,b.name)}${btn('bucket-up','↑',{id:b.id,title:'버킷 위로',disabled:i===0})}${btn('bucket-down','↓',{id:b.id,title:'버킷 아래로',disabled:i===p.buckets.length-1})}${ib('bucket-delete','trash','버킷 삭제',b.id,p.buckets.length===1)}</div>`).join('')}</div><form data-form="bucket-add" class="inline-form">${input('name="name" placeholder="새 버킷 이름" aria-label="새 버킷 이름" maxlength="160"')}<button>추가</button></form></section><section class="panel"><h3>레이블</h3>${p.labels.map(l=>`<div class="management-row">${input(`data-label-color="${l.id}" aria-label="${esc(labelName(p,l.id))} 색상"`,l.color,'color')}${input(`data-label-name="${l.id}" aria-label="${esc(labelName(p,l.id))} 이름" placeholder="${esc(labelName(p,l.id))}" maxlength="160"`,l.name)}${ib('label-delete','trash','레이블 삭제',l.id)}</div>`).join('')}<form data-form="label-add" class="inline-form">${input('name="name" placeholder="새 레이블명" aria-label="새 레이블명" maxlength="160"')}${input('name="color" aria-label="새 레이블 색상"','#2f8f83','color')}<button>추가</button></form></section><section class="panel storage"><h3>저장소</h3><div class="storage-icon">${icon('check')}</div><b>하나의 base, 하나의 워크스페이스</b><p id="storage-detail"></p><p class="muted">코드 · 설정 · Task · 보고서를 이 앱 폴더 안에서 관리합니다. PC와 서비스가 실행 중일 때 예약을 확인합니다.</p>${btn('save-retry','저장 다시 시도')}</section></div></div>${notifications(p)}${backupPanel()}`;}
-function completionTarget(p,a){return a==='move'?field('대상 버킷',select('name="bucket"',p.buckets.map(b=>[b.id,b.name]),p.completion.bucket)):a==='label'?field('대상 레이블',select('name="label"',p.labels.map(l=>[l.id,labelName(p,l.id)]),p.completion.label)):'';}
+function settings(p){return `<div class="settings-general"><div class="section-heading"><span class="eyebrow">MAKE IT YOURS</span><div class="settings-heading-row"><h2>일반 설정</h2><span class="settings-save-status" id="general-save-state" role="status"></span></div></div><div class="general-grid"><section class="panel"><h3>Planner</h3><form data-form="planner-settings">${field('이름',input('name="name" maxlength="160"',p.name))}${field('설명',input('name="description" maxlength="300"',p.description))}</form></section><section class="panel appearance"><h3>화면</h3><div class="width-setting">${field('버킷 가로 넓이',`<input type="range" data-width min="260" max="480" step="10" value="${p.appearance.width}">`)}${input('data-width-number min="260" max="480" step="10" aria-label="버킷 넓이 숫자"',p.appearance.width,'number')}<span>px</span>${btn('width-reset','초기화')}</div><div class="color-inputs">${['사이트 배경','사이드바','버킷 배경','Task 팝업'].map((name,i)=>field(name,input(`data-color="${i}" aria-label="${name}"`,p.appearance.colors[i].slice(0,7),'color'))).join('')}</div><p class="label-title">추천 색상 조합</p><div class="palette-list">${palettes.map((x,i)=>paletteButton(x,'palette',String(i))).join('')}</div><div class="subheading"><b>사용자 지정 조합</b>${btn('palette-add','현재 조합 추가')}</div><div class="palette-list">${p.appearance.custom.map((x,i)=>`<div class="custom-palette">${paletteButton(x,'palette-custom',String(i))}${ib('palette-delete','close','사용자 조합 삭제',String(i))}</div>`).join('')||'<span class="muted">저장된 조합 없음</span>'}</div>${btn('palette-reset','색상 초기화')}</section>${completionPanel(p)}<section class="panel"><h3>버킷</h3><div class="management-list" data-bucket-manage>${p.buckets.map((b,i)=>`<div class="management-row" data-bucket-row="${b.id}"><span class="drag-handle" data-bucket-handle="${b.id}" tabindex="0" title="버킷 순서 이동">${icon('grip')}</span>${input(`data-manage-bucket="${b.id}" aria-label="버킷 이름 ${esc(b.name)}" maxlength="160"`,b.name)}${btn('bucket-up','↑',{id:b.id,title:'버킷 위로',disabled:i===0})}${btn('bucket-down','↓',{id:b.id,title:'버킷 아래로',disabled:i===p.buckets.length-1})}${ib('bucket-delete','trash','버킷 삭제',b.id,p.buckets.length===1)}</div>`).join('')}</div><form data-form="bucket-add" class="inline-form">${input('name="name" placeholder="새 버킷 이름" aria-label="새 버킷 이름" maxlength="160"')}<button>추가</button></form></section><section class="panel"><h3>레이블</h3>${p.labels.map(l=>`<div class="management-row">${input(`data-label-color="${l.id}" aria-label="${esc(labelName(p,l.id))} 색상"`,l.color,'color')}${input(`data-label-name="${l.id}" aria-label="${esc(labelName(p,l.id))} 이름" placeholder="${esc(labelName(p,l.id))}" maxlength="160"`,l.name)}${ib('label-delete','trash','레이블 삭제',l.id)}</div>`).join('')}<form data-form="label-add" class="inline-form">${input('name="name" placeholder="새 레이블명" aria-label="새 레이블명" maxlength="160"')}${input('name="color" aria-label="새 레이블 색상"','#2f8f83','color')}<button>추가</button></form></section><section class="panel storage"><h3>저장소</h3><div class="storage-icon">${icon('check')}</div><b>하나의 base, 하나의 워크스페이스</b><p id="storage-detail"></p><p class="muted">코드 · 설정 · Task · 보고서를 이 앱 폴더 안에서 관리합니다. PC와 서비스가 실행 중일 때 예약을 확인합니다.</p>${btn('save-retry','저장 다시 시도')}</section></div></div>${notifications(p)}${backupPanel()}`;}
+const completionActions=[['none','없음'],['move','특정 버킷으로 이동'],['label','레이블 변경'],['delete','삭제']];
+function completionEdit(p){
+  let edit=completionDrafts.get(p.id);
+  if(!edit||sameSettings(edit.value,edit.baseline)&&!sameSettings(edit.baseline,p.completion)){
+    edit={baseline:clone(p.completion),value:clone(p.completion)};
+    completionDrafts.set(p.id,edit);
+  }
+  return edit;
+}
+function completionTarget(p,value){
+  if(value.action==='move')return field('대상 버킷',select('name="bucket"',[['','대상 버킷 선택'],...p.buckets.map(b=>[b.id,b.name])],value.bucket));
+  if(value.action==='label')return field('대상 레이블',select('name="label"',[['','대상 레이블 선택'],...p.labels.map(l=>[l.id,labelName(p,l.id)])],value.label));
+  return '';
+}
+function completionPanel(p){
+  const {baseline,value}=completionEdit(p);
+  const conflict=!sameSettings(baseline,p.completion);
+  return `<section class="panel" id="completion-panel"><h3>완료 액션</h3>
+    <p class="muted">미완료 Task를 완료로 바꿀 때 적용합니다. 삭제는 Task를 영구 삭제합니다.</p>
+    <form data-form="completion">
+      ${field('동작',select('name="action" data-completion-action',completionActions,value.action))}
+      <div id="completion-target">${completionTarget(p,value)}</div>
+      <div class="settings-apply-row">${btn('completion-apply','완료 액션 적용',{cls:'primary'})}
+        <span class="settings-save-status" id="completion-apply-state" role="status"></span>
+        ${conflict?btn('completion-reload','최신 적용값 불러오기'):''}
+      </div>
+    </form></section>`;
+}
+function completionAfterCatalogChanges(previous,current){
+  const value={...previous.completion};
+  if(previous.buckets.some(b=>b.id===value.bucket)&&!current.buckets.some(b=>b.id===value.bucket))value.bucket=current.buckets[0].id;
+  if(previous.labels.some(l=>l.id===value.label)&&!current.labels.some(l=>l.id===value.label))value.label=current.labels[0]?.id||'';
+  if(!current.labels.length&&value.action==='label')value.action='none';
+  return value;
+}
+async function applyCompletion(p){
+  const edit=completionEdit(p);
+  if(edit.applying||sameSettings(edit.value,edit.baseline))return;
+  const value=clone(edit.value);
+  edit.error='';
+  edit.applying=true;
+  try{
+    await enqueueSave(async()=>{
+      const index=savedState.planners.findIndex(item=>item.id===p.id);
+      const previous=savedState.planners[index];
+      if(!previous||!sameSettings(edit.baseline,previous.completion))throw Error('최신 완료 액션을 불러온 뒤 다시 적용하세요.');
+      const current=state.planners.find(item=>item.id===p.id);
+      if(!current||current.deletedAt)throw Error('Planner를 찾을 수 없습니다.');
+      if(value.action==='move'&&![current,previous].every(item=>item.buckets.some(b=>b.id===value.bucket)))throw Error('대상 버킷을 선택하세요.');
+      if(value.action==='label'&&![current,previous].every(item=>item.labels.some(l=>l.id===value.label)))throw Error('대상 레이블을 선택하세요.');
+      const next={...previous,completion:value};
+      const result=await api('/api/planner','PUT',{planner:next,version:plannerVersions.get(p.id)});
+      savedState.planners[index]=next;
+      plannerVersions.set(p.id,result.version);
+      completionWrites.set(p.id,result.version);
+      acknowledgeSave(result);
+      current.completion=completionAfterCatalogChanges(next,current);
+      edit.baseline=clone(value);
+    });
+    notify('완료 액션 적용 완료');
+  }catch(error){
+    edit.error=error.message;
+    throw error;
+  }finally{
+    edit.applying=false;
+    storageLabel();
+  }
+}
+function savePlannerIdentity(p,form){
+  if(!p)return;
+  const {name,description}=form.elements;
+  name.value=name.value.trim()||'Kanban Planner';
+  description.value=description.value.trim()||'Kanban planner';
+  if(p.name===name.value&&p.description===description.value)return;
+  p.name=name.value;
+  p.description=description.value;
+  $('.brand strong').textContent=p.name;
+  $('.brand small').textContent=p.description;
+  $('main>header .eyebrow').textContent=p.name;
+  return persist('');
+}
 function paletteButton(x,action,id){return btn(action,`<span class="swatches">${x.colors.map(c=>`<i style="background:${c}"></i>`).join('')}</span>${esc(x.name)}`,{id,cls:'palette'});}
-const sameNotifications=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+const sameSettings=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 function notificationEdit(p){
   let edit=notificationDrafts.get(p.id);
-  if(!edit||sameNotifications(edit.value,edit.baseline)&&!sameNotifications(edit.baseline,p.notifications)){
+  if(!edit||sameSettings(edit.value,edit.baseline)&&!sameSettings(edit.baseline,p.notifications)){
     edit={baseline:clone(p.notifications),value:clone(p.notifications)};
     notificationDrafts.set(p.id,edit);
   }
   return edit;
 }
 function draft(p){return notificationEdit(p).value;}
-async function saveNotificationEdit(p,notifications,test){
+async function saveNotificationEdit(p,notifications){
   const edit=notificationEdit(p);
   return enqueueSave(async()=>{
     try{
       const saved=await api('/api/action','POST',{action:'notification-save',planner:p.id,
-        baseline:edit.baseline,notifications,test});
+        baseline:edit.baseline,notifications});
       const current=state.planners.find(item=>item.id===p.id);
       if(current)current.notifications=clone(notifications);
       const previous=savedState.planners.find(item=>item.id===p.id);
@@ -392,8 +525,8 @@ function messageFormEditor(p,n){
     </fieldset>
   </section>`;
 }
-function notificationSchedule(n){
-  const forms=messageFormOptions(n);
+function notificationSchedule(n,applied){
+  const forms=messageFormOptions(n),pendingReview=new Set(applied.rows.filter(row=>row.reviewRequired).map(row=>row.id));
   return `<h3>시간별 알림 설정</h3><div class="schedule-rows">${n.rows.map((row,index)=>`<div class="schedule-row">
     <div class="schedule-checks">${['teams','outlook','export'].map((key,i)=>check(`data-row="${row.id}" data-key="${key}"`,row[key],['Teams','Outlook','내보내기'][i])).join('')}</div>
     <div class="schedule-fields">
@@ -403,7 +536,7 @@ function notificationSchedule(n){
       <div class="row-actions">${ib('row-add','plus','시간행 추가',row.id,n.rows.length>=1000)}${ib('row-delete','close','시간행 제거',row.id,n.rows.length===1)}</div>
     </div>
     ${row.reviewRequired?`<div class="message-review"><span class="overdue">검토 필요 · 자동 실행 대기</span>
-      ${btn('message-review-open','양식 확인',{id:row.id})}${btn('message-review-save','검토 완료 및 저장',{id:row.id})}</div>`:''}
+      ${btn('message-review-open','양식 확인',{id:row.id})}${btn('message-review-complete','검토 완료',{id:row.id})}</div>`:pendingReview.has(row.id)?'<span class="muted">검토 완료 · 적용 전 자동 실행 대기</span>':''}
   </div>`).join('')}</div>`;
 }
 function notificationActions(n,row){
@@ -411,25 +544,26 @@ function notificationActions(n,row){
     <div class="notification-actions">
       ${field('발송 시간',select('data-preview-row',n.rows.map(r=>[r.id,r.time]),row.id))}
       ${field('미리보기 채널',select('data-message-preview-channel',[['teams','Teams'],['outlook','Outlook']],messagePreviewChannel))}
-      ${btn('notification-preview','미리보기')}${btn('notification-save','저장',{cls:'primary'})}
+      ${btn('notification-preview','미리보기')}
     </div>
     <div class="notification-actions">
       ${btn('notification-teams','Teams 테스트 전송')}${btn('notification-outlook','Outlook 메일 테스트 전송')}${btn('notification-export','테스트 내보내기')}
     </div>
-    <p class="muted">테스트 전송은 현재 설정을 저장하고 실제 연결로 보냅니다. 테스트 내보내기는 설정과 예약 기록을 변경하지 않습니다.</p>
+    <p class="muted">테스트 전송은 편집 중인 설정으로 실제 연결에 보냅니다. 테스트 전송과 내보내기는 예약 설정과 실행 기록을 변경하지 않습니다.</p>
     <div id="notification-output" class="output" role="status" hidden></div>
   </section>`;
 }
-function notificationDestinations(n){
+function notificationDestinations(n,applied){
+  const effective=id=>`<small class="muted">현재 예약 ${applied[id]?'켜짐':'꺼짐'}</small>`;
   const toggle=(id,label)=>btn('channel-toggle',`<span class="status-dot ${n[id]?'on':''}"></span>${label} ${n[id]?'ON':'OFF'}`,{
     id,cls:n[id]?'selected':'',extra:`aria-pressed="${n[id]}"`
   });
   const result=id=>`<small class="destination-result" data-destination-result="${id}" role="status"></small>`;
   const channels=[['teams','Teams','Teams 알림','Teams Workflows 연결 주소'],['outlook','Outlook','Outlook 메일','Power Automate 메일 연결 주소']];
-  return channels.map(([id,name,label,address])=>`<div class="channel-row">${toggle(id,label)}
+  return channels.map(([id,name,label,address])=>`<div class="channel-row"><div class="notification-channel-state">${effective(id)}${toggle(id,label)}</div>
     ${field(address,input(`data-n="${id}Url" autocomplete="off" spellcheck="false" placeholder="연결 주소를 입력하세요"`,n[id+'Url'],'password'))}
     ${btn('connection-test',`${name} 연결 테스트`,{id})}
-    ${result(id)}</div>`).join('')+`<div class="channel-row">${toggle('export','내보내기')}
+    ${result(id)}</div>`).join('')+`<div class="channel-row"><div class="notification-channel-state">${effective('export')}${toggle('export','내보내기')}</div>
     ${field('내보내기 폴더',input(`data-n="exportFolder" maxlength="4096" spellcheck="false" placeholder="${esc(status.reportPath)}"`,n.exportFolder??''))}
     <div class="destination-actions">${status.nativeFolderPicker!==false?btn('folder-picker','폴더 선택'):''}${btn('folder-test','위치 테스트')}</div>
     <small class="muted">폴더를 선택하거나 절대 경로를 입력하세요. 비워 두면 앱의 reports 폴더에 저장합니다.</small>${result('export')}</div>`;
@@ -440,6 +574,7 @@ function setReportFolder(p,selectedFolder){
   $('[data-n="exportFolder"]').value=folder;
   $('[data-destination-result="export"]').textContent='';
   hideOutput();
+  storageLabel();
 }
 function notifications(p){
   const {baseline,value:n}=notificationEdit(p),selectedRow=selectedMessageRow(p);
@@ -447,13 +582,20 @@ function notifications(p){
   const deliveries=status.delivery?.filter(item=>item.key.startsWith(p.id+'/')).slice(-8)||[];
   const pending=status.pendingReports?.[p.id];
   return `<div class="notification-section">
-    <div class="section-heading"><span class="eyebrow">STAY IN THE LOOP</span><h2>알림과 예약 내보내기</h2><p>월~금, PC 로컬 시각에 실행합니다. 미리보기는 저장하거나 전송하지 않습니다.</p></div>
-    ${!sameNotifications(baseline,p.notifications)?`<section class="panel notification-conflict" aria-label="알림 설정 충돌">
+    <div class="section-heading"><span class="eyebrow">STAY IN THE LOOP</span>
+      <div class="settings-heading-row"><h2>알림과 예약 내보내기</h2>
+        <div class="settings-apply-row">${btn('notification-save','알림 설정 적용',{cls:'primary'})}
+          <span class="settings-save-status" id="notification-apply-state" role="status"></span>
+        </div>
+      </div>
+      <p>월~금, PC 로컬 시각에 실행합니다. 변경한 설정은 적용한 뒤부터 예약에 반영됩니다.</p>
+    </div>
+    ${!sameSettings(baseline,p.notifications)?`<section class="panel notification-conflict" aria-label="알림 설정 충돌">
       <p role="status">다른 화면에서 알림 설정이 변경되었습니다. 이 화면의 입력을 보관하고 최신 설정을 불러온 뒤 필요한 변경을 다시 적용하세요.</p>
       ${btn('notification-reload','최신 설정 불러오기')}
     </section>`:''}
     <div class="notification-top"><section class="panel">
-      <h3>채널</h3>${notificationDestinations(n)}${notificationSchedule(n)}
+      <h3>채널</h3>${notificationDestinations(n,p.notifications)}${notificationSchedule(n,p.notifications)}
     </section>${messageFormEditor(p,n)}</div>
     ${notificationActions(n,selectedRow)}
     <section class="panel schedule-status"><h3>최근 예약 실행 상태</h3>
@@ -464,10 +606,12 @@ function notifications(p){
 }
 function openPlannerModal(id=null){const p=state.planners.find(p=>p.id===id);modal={kind:'planner',id};$('#overlay').innerHTML=`<div class="modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="modal-title" class="dialog small"><div class="dialog-header"><h2 id="modal-title">${p?'Planner 편집':'새 Planner'}</h2>${ib('modal-cancel','close','닫기')}</div><form data-form="planner-modal">${field('이름',input('name="name" required maxlength="160" autocomplete="off"',p?.name||''))}${field('설명',input('name="description" maxlength="300"',p?.description||''))}<div class="dialog-actions">${btn('modal-cancel','취소')}<button class="primary">${p?'저장':'만들기'}</button></div></form></section></div>`;$('input[name="name"]',$('#overlay')).focus();}
 function openProject(id,boardEdit=false){
-  const p=planner(),project=p.projects.find(x=>x.id===id)||newProject();
-  modal={kind:'project',id:id||null,boardEdit};
-  $('#overlay').innerHTML=`<div class="modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="modal-title" class="dialog small"><div class="dialog-header"><h2 id="modal-title">${id?'목표 편집':'새 목표'}</h2>${ib('modal-cancel','close','닫기')}</div><form data-form="project-modal">${field('목표 이름',input('name="name" required maxlength="160"',project.name))}${field('설명',`<textarea name="description" maxlength="300" rows="3">${esc(project.description)}</textarea>`)}${status.projectLabels?field('목표 레이블',select('name="labelId" aria-label="목표 레이블" aria-describedby="project-label-hint"',[['','레이블 없음'],...p.labels.map(l=>[l.id,labelName(p,l.id)])],project.labelId??'')+`<small id="project-label-hint" class="muted">소속 Task에 자동으로 적용됩니다.</small>`):''}<div class="two-col">${field('시작일',input('name="start"',project.start,'date'))}${field('기한',input('name="due"',project.due,'date'))}</div><div class="dialog-actions">${btn('modal-cancel','취소')}<button type="submit" class="primary">저장</button></div></form></section></div>`;
-  $('input[name="name"]',$('#overlay')).focus();
+  const p=planner(),existing=p.projects.find(x=>x.id===id),project=existing||{...newProject(),start:day()};
+  modal={kind:'project',id:existing?.id??null,boardEdit};
+  $('#overlay').innerHTML=`<div class="modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="modal-title" class="dialog small"><div class="dialog-header"><h2 id="modal-title">${existing?'목표 편집':'새 목표'}</h2>${ib('project-modal-close','close',existing?'닫기 · 자동 저장':'닫기')}</div><form data-form="project-modal">${field('목표 이름',input('name="name" required maxlength="160"',project.name))}${field('설명',`<textarea name="description" maxlength="300" rows="3">${esc(project.description)}</textarea>`)}${status.projectLabels?field('목표 레이블',select('name="labelId" aria-label="목표 레이블" aria-describedby="project-label-hint"',[['','레이블 없음'],...p.labels.map(l=>[l.id,labelName(p,l.id)])],project.labelId??'')+`<small id="project-label-hint" class="muted">소속 Task에 자동으로 적용됩니다.</small>`):''}<div class="two-col">${field('시작일',input('name="start"',project.start,'date'))}${field('기한',input('name="due"',project.due,'date'))}</div><div class="dialog-actions">${btn('modal-cancel','취소')}<button type="submit" class="primary">저장</button></div></form></section></div>`;
+  const form=$('[data-form="project-modal"]');
+  if(existing)modal.initialValues=new FormData(form);
+  form.elements.name.focus();
 }
 function focusBoardProjectEdit(id){
   $(`[data-action="board-project-edit"][data-id="${CSS.escape(id)}"]`)?.focus({preventScroll:true});
@@ -510,7 +654,8 @@ function openTask(id,bucket,projectId){
   const p=planner(),existing=p.tasks.find(t=>t.id===id);
   rememberProjectPreview();
   const previewTaskId=projectPreview&&existing?.projectId===projectPreview.id?id:null;
-  task=clone(existing||newTask(p,bucket,projectId));
+  task=existing?clone(existing):newTask(p,bucket,projectId);
+  if(!existing)task.start=day(task.createdAt);
   taskDateBaseline={start:task.start,due:task.due};
   modal={kind:'task',existing:!!existing,previewTaskId,previewAdd:!!projectPreview&&!existing&&projectPreview.id===projectId};
   renderTask();
@@ -528,8 +673,8 @@ function updateTaskDueHint(p){
   const field=$('#task-due-source');
   if(field)field.textContent=inheritedDueHint(p,$('#task-project')?.value,$('#task-due').value.trim());
 }
-function renderTask(){const p=planner();$('#overlay').innerHTML=`<div class="modal-backdrop"><section role="dialog" aria-modal="true" aria-label="Task 상세" class="dialog task-dialog"><div class="task-dialog-top">${select('id="task-bucket" aria-label="Task 버킷"',p.buckets.map(b=>[b.id,b.name]),task.bucket)}<div class="row-actions">${modal.existing?ib('task-options','more','Task 옵션'):''}${ib('task-close','close','닫기 · 자동 저장')}</div></div><form data-form="task" id="task-form"><button type="submit" hidden aria-hidden="true" tabindex="-1">저장</button><div class="task-main"><input id="task-title" name="title" placeholder="Task 제목" value="${esc(task.title)}" aria-label="Task 제목" autocomplete="off" required><div class="task-labels"><div class="chips">${task.labels.map(id=>`<span class="chosen-label">${chips(p,[id])}${ib('task-label-remove','close','Task에서 레이블 해제',id)}</span>`).join('')}</div><input id="label-search" placeholder="레이블 검색 또는 선택" autocomplete="off" aria-label="레이블 검색 또는 선택"><div id="task-inherited-label" class="chips inherited-label">${inheritedLabel(p,task.projectId)}</div></div><div class="subheading"><h3>체크리스트 <span class="count">${task.checklist.filter(c=>c.done).length}/${task.checklist.length}</span></h3>${check('id="show-checklist"',task.showChecklist,'보드에서 표시')}</div><div id="checklist" class="checklist">${task.checklist.map(c=>`<div class="checklist-row ${c.done?'completed':''}" data-check-row="${c.id}"><span class="drag-handle" data-check-handle="${c.id}" title="체크리스트 순서 변경">${icon('grip')}</span><input type="checkbox" data-task-check="${c.id}" aria-label="체크리스트 완료 ${esc(c.text)}" ${c.done?'checked':''}>${input(`data-check-text="${c.id}" aria-label="체크리스트 내용"`,c.text)}${ib('check-delete','close','체크리스트 항목 삭제',c.id)}</div>`).join('')}</div><div class="inline-form">${input('id="check-add-input" placeholder="항목 추가" aria-label="새 체크리스트 항목"')}${btn('check-add',icon('plus'),{title:'체크리스트 추가'})}</div><div class="subheading"><h3>메모</h3>${check('id="show-notes"',task.showNotes,'보드에서 표시')}</div><textarea id="task-notes" placeholder="메모를 남겨보세요" aria-label="메모" rows="6">${esc(task.notes)}</textarea></div><aside class="task-aside"><span class="label-title">TASK DETAILS</span>${status.projects?field('목표',select('id="task-project"',projectOptions(p),task.projectId??'none')):''}${btn('task-draft-toggle',`${task.completed?icon('check'):'<span class="mini-check"></span>'}${task.completed?'완료':'미완료'}`,{cls:`task-status ${task.completed?'selected':''}`})}${field('우선순위',select('id="task-priority"',['상','중','하'].map(x=>[x,x]),task.priority))}${field('시작 날짜',dateControl('id="task-start"',task.start,'시작 날짜'))}${field('기한',dateControl('id="task-due" aria-describedby="task-due-source"',task.due,'기한')+`<small class="muted" id="task-due-source">${inheritedDueHint(p,task.projectId,task.due)}</small>`)}${field('완료 날짜',`<span class="readonly">${task.completed||'-'}${task.completedByProject?' · 목표에서 상속':''}</span>`)}${modal.existing?`<div class="task-timestamps"><small>생성 ${new Date(task.createdAt).toLocaleString('ko-KR')}</small><small>수정 ${new Date(task.updatedAt).toLocaleString('ko-KR')}</small></div>`:''}</aside><div class="task-save-note">닫으면 현재 내용이 자동 저장됩니다.${btn('task-close','완료',{cls:'primary'})}</div></form></section></div>`;autoGrow($('#task-notes'));}
-function captureTask(normalize=false){if(normalize)dateValidationErrors=[];if(!task||!$('#task-title'))return;task.title=$('#task-title').value;task.bucket=$('#task-bucket').value;const project=$('#task-project')?.value;if(project)task.projectId=project==='none'?null:project;task.priority=$('#task-priority').value;task.notes=$('#task-notes').value;task.showChecklist=$('#show-checklist').checked;task.showNotes=$('#show-notes').checked;for(const key of ['start','due']){const text=$('#task-'+key).value;if(normalize){try{task[key]=parseDate(text);}catch{task[key]=taskDateBaseline[key];dateValidationErrors.push(key==='start'?'시작 날짜':'기한');}}else task[key]=text;}task.checklist.forEach(c=>{const inp=$(`[data-check-text="${c.id}"]`),box=$(`[data-task-check="${c.id}"]`);if(inp)c.text=inp.value;if(box)c.done=box.checked;});}
+function renderTask(){const p=planner();$('#overlay').innerHTML=`<div class="modal-backdrop"><section role="dialog" aria-modal="true" aria-label="Task 상세" class="dialog task-dialog"><div class="task-dialog-top">${select('id="task-bucket" aria-label="Task 버킷"',p.buckets.map(b=>[b.id,b.name]),task.bucket)}<div class="row-actions">${modal.existing?ib('task-options','more','Task 옵션'):''}${ib('task-close','close','닫기 · 자동 저장')}</div></div><form data-form="task" id="task-form"><div class="task-main"><input id="task-title" name="title" placeholder="Task 제목" value="${esc(task.title)}" aria-label="Task 제목" autocomplete="off" required><div class="task-labels"><div class="chips">${task.labels.map(id=>`<span class="chosen-label">${chips(p,[id])}${ib('task-label-remove','close','Task에서 레이블 해제',id)}</span>`).join('')}</div><input id="label-search" placeholder="레이블 검색 또는 선택" autocomplete="off" aria-label="레이블 검색 또는 선택"><div id="task-inherited-label" class="chips inherited-label">${inheritedLabel(p,task.projectId)}</div></div><div class="subheading"><h3>체크리스트 <span class="count">${task.checklist.filter(c=>c.done).length}/${task.checklist.length}</span></h3>${check('id="show-checklist"',task.showChecklist,'보드에서 표시')}</div><div id="checklist" class="checklist">${task.checklist.map(c=>`<div class="checklist-row ${c.done?'completed':''}" data-check-row="${c.id}"><span class="drag-handle" data-check-handle="${c.id}" title="체크리스트 순서 변경">${icon('grip')}</span><input type="checkbox" data-task-check="${c.id}" aria-label="체크리스트 완료 ${esc(c.text)}" ${c.done?'checked':''}>${input(`data-check-text="${c.id}" aria-label="체크리스트 내용"`,c.text)}${ib('check-delete','close','체크리스트 항목 삭제',c.id)}</div>`).join('')}</div><div class="inline-form">${input('id="check-add-input" placeholder="항목 추가" aria-label="새 체크리스트 항목"')}${btn('check-add',icon('plus'),{title:'체크리스트 추가'})}</div><div class="subheading"><h3>메모</h3>${check('id="show-notes"',task.showNotes,'보드에서 표시')}</div><textarea id="task-notes" placeholder="메모를 남겨보세요" aria-label="메모" rows="6">${esc(task.notes)}</textarea></div><aside class="task-aside"><span class="label-title">TASK DETAILS</span>${status.projects?field('목표',select('id="task-project"',projectOptions(p),task.projectId??'none')):''}${btn('task-draft-toggle',`${task.completed?icon('check'):'<span class="mini-check"></span>'}${task.completed?'완료':'미완료'}`,{cls:`task-status ${task.completed?'selected':''}`})}${field('우선순위',select('id="task-priority"',['상','중','하'].map(x=>[x,x]),task.priority))}${field('시작일',dateControl('id="task-start"',task.start,'시작일'))}${field('기한',dateControl('id="task-due" aria-describedby="task-due-source"',task.due,'기한')+`<small class="muted" id="task-due-source">${inheritedDueHint(p,task.projectId,task.due)}</small>`)}${field('완료 날짜',`<span class="readonly">${task.completed||'-'}${task.completedByProject?' · 목표에서 상속':''}</span>`)}${modal.existing?`<div class="task-timestamps"><small>생성 ${new Date(task.createdAt).toLocaleString('ko-KR')}</small><small>수정 ${new Date(task.updatedAt).toLocaleString('ko-KR')}</small></div>`:''}</aside><div class="task-save-note"><span>닫으면 현재 내용이 자동 저장됩니다.</span><div class="row-actions">${btn('modal-cancel','취소')}<button type="submit" class="primary">저장</button></div></div></form></section></div>`;autoGrow($('#task-notes'));}
+function captureTask(normalize=false){if(normalize)dateValidationErrors=[];if(!task||!$('#task-title'))return;task.title=$('#task-title').value;task.bucket=$('#task-bucket').value;const project=$('#task-project')?.value;if(project)task.projectId=project==='none'?null:project;task.priority=$('#task-priority').value;task.notes=$('#task-notes').value;task.showChecklist=$('#show-checklist').checked;task.showNotes=$('#show-notes').checked;for(const key of ['start','due']){const text=$('#task-'+key).value;if(normalize){try{task[key]=parseDate(text);}catch{task[key]=taskDateBaseline[key];dateValidationErrors.push(key==='start'?'시작일':'기한');}}else task[key]=text;}task.checklist.forEach(c=>{const inp=$(`[data-check-text="${c.id}"]`),box=$(`[data-task-check="${c.id}"]`);if(inp)c.text=inp.value;if(box)c.done=box.checked;});}
 function finishTask(){
   const {previewTaskId,previewAdd}=modal??{};
   task=null;
@@ -545,9 +690,13 @@ function finishTask(){
   }
 }
 function closeTask(){captureTask(true);const saved=saveTask(planner(),task);finishTask();persist(dateValidationErrors.length?`${dateValidationErrors.join(', ')} 오류: 기존 날짜 유지 · 나머지 내용 저장 완료`:saved?'Task 저장 완료':'변경 저장 완료').catch(()=>{});}
-function closeModal(){
+function closeModal({discard=false}={}){
   if(modal?.applying)return;
-  if(modal?.kind==='task'){closeTask();return;}
+  if(modal?.kind==='task'){discard?finishTask():closeTask();return;}
+  if(modal?.kind==='project'&&modal.id&&!discard){
+    $('[data-form="project-modal"]').requestSubmit();
+    return;
+  }
   if(modal?.kind==='project-preview'){closeProjectPreview();return;}
   const previous=modal;
   modal=null;
@@ -645,7 +794,8 @@ async function handleAction(action,id,el,e){const p=planner();
     case 'planner-new':openPlannerModal();break;case 'planner-edit':openPlannerModal(id);break;
     case 'planner-delete':{const plan=state.planners.find(p=>p.id===id);if(await confirmAction('Planner 삭제',`“${plan.name}”을 휴지통으로 이동할까요? 30일 동안 복원할 수 있습니다.`)){plan.deletedAt=new Date().toISOString();if(selected===id){selected=null;view='home';}render();await persist('휴지통으로 이동했습니다.');}break;}
     case 'planner-restore':{const plan=state.planners.find(p=>p.id===id);if(Date.now()-Date.parse(plan.deletedAt)>=30*86400000)throw Error('보관 기간이 지났습니다.');plan.deletedAt=null;render();await persist('Planner 복원 완료');break;}
-    case 'modal-cancel':closeModal();break;
+    case 'modal-cancel':closeModal({discard:true});break;
+    case 'project-modal-close':closeModal();break;
     case 'bucket-new':openBucketModal();break;
     case 'bucket-delete':{const b=p.buckets.find(b=>b.id===id),dest=p.buckets.find(b=>b.id!==id),n=p.tasks.filter(t=>t.bucket===id).length;if(!dest)break;if(await confirmAction('버킷 삭제',`“${b.name}”을 삭제할까요?${n?` Task ${n}개는 “${dest.name}”으로 이동합니다.`:''}`)){removeBucket(p,id);render();await persist('버킷 삭제 완료');}break;}
     case 'bucket-up':case 'bucket-down':{const i=p.buckets.findIndex(b=>b.id===id),to=i+(action==='bucket-up'?-1:1);if(to<0||to>=p.buckets.length)break;const [b]=p.buckets.splice(i,1);p.buckets.splice(to,0,b);render();await persist('');break;}
@@ -696,14 +846,24 @@ async function handleAction(action,id,el,e){const p=planner();
     case 'palette-delete':p.appearance.custom.splice(+id,1);render();await persist('');break;
     case 'palette-reset':p.appearance.colors=clone(palettes[0].colors);render();await persist('색상 초기화');break;
     case 'save-retry':saveError='';await persist();break;
+    case 'completion-apply':await applyCompletion(p);break;
+    case 'completion-reload':{
+      if(await confirmAction('최신 완료 액션 불러오기','적용 전 완료 액션 변경사항을 최신 적용값으로 교체할까요?','불러오기')){
+        completionDrafts.delete(p.id);
+        if(view==='settings'&&planner()?.id===p.id){
+          $('#completion-panel').outerHTML=completionPanel(p);
+          storageLabel();
+          $('[data-completion-action]').focus();
+        }
+      }
+      break;
+    }
     case 'channel-toggle':{
-      const edit=draft(p),n=clone(edit);
+      const n=draft(p);
       n[id]=!n[id];
-      validateNotifications(n);
-      edit[id]=n[id];
-      await saveNotificationEdit(p,n);
-      if(view==='settings'&&planner()?.id===p.id)redrawNotifications();
-      notify('알림 설정 저장 완료');
+      notificationEdit(p).error='';
+      redrawNotifications();
+      $(`[data-action="channel-toggle"][data-id="${id}"]`)?.focus({preventScroll:true});
       break;
     }
     case 'notification-reload':{
@@ -818,18 +978,30 @@ async function handleAction(action,id,el,e){const p=planner();
       $('[data-message-form]').focus();
       break;
     }
-    case 'message-review-save':case 'notification-save':{
-      const edit=draft(p),n=clone(edit);
-      if(action==='message-review-save')n.rows.find(row=>row.id===id).reviewRequired=false;
-      validateNotifications(n);
-      if(action==='message-review-save')edit.rows.find(row=>row.id===id).reviewRequired=false;
-      await saveNotificationEdit(p,n);
-      notify('알림 설정 저장 완료');
-      if(action==='message-review-save'){
-        if(view==='settings'&&planner()?.id===p.id){
-          redrawNotifications();
-          $(`[data-row="${id}"][data-key="formId"]`)?.focus();
-        }
+    case 'message-review-complete':{
+      draft(p).rows.find(row=>row.id===id).reviewRequired=false;
+      notificationEdit(p).error='';
+      redrawNotifications();
+      $(`[data-row="${id}"][data-key="formId"]`)?.focus();
+      break;
+    }
+    case 'notification-save':{
+      const edit=notificationEdit(p);
+      if(edit.applying||sameSettings(edit.value,edit.baseline)||!sameSettings(edit.baseline,p.notifications))break;
+      const n=clone(edit.value);
+      edit.error='';
+      try{
+        validateNotifications(n);
+        edit.applying=true;
+        await saveNotificationEdit(p,n);
+        if(view==='settings'&&planner()?.id===p.id)redrawNotifications();
+        notify('알림 설정 적용 완료');
+      }catch(error){
+        edit.error=error.message;
+        throw error;
+      }finally{
+        edit.applying=false;
+        storageLabel();
       }
       break;
     }
@@ -840,14 +1012,10 @@ async function handleAction(action,id,el,e){const p=planner();
       try{
         let data;
         const command=action.slice(13);
-        if(command==='teams'||command==='outlook'){
-          const {ticket}=await saveNotificationEdit(p,n,{channel:command,row});
-          data=await api('/api/action','POST',{action:'notification-test',ticket});
-        }else{
-          await saveChain;
-          if(saveError)throw Error(saveError);
-          data=await api('/api/action','POST',{action:command,planner:p.id,notifications:n,row,channel});
-        }
+        await saveChain;
+        if(saveError)throw Error(saveError);
+        const send=command==='teams'||command==='outlook';
+        data=await api('/api/action','POST',{action:send?'notification-test':command,planner:p.id,notifications:n,row,channel:send?command:channel});
         const out=view==='settings'&&planner()?.id===p.id?$('#notification-output'):null;
         if(out){
           out.hidden=false;
@@ -956,7 +1124,7 @@ async function handleBackup(action,button){
         await api('/api/backup','POST',{kind:'file',backup,action:'apply',mode,sourcePlanner,targetPlanner,revision:summary.currentRevision});
         const fresh=await api('/api/state');
         acceptWorkspace(fresh);
-        for(const map of [notificationDrafts,formSelection,rowSelection]){
+        for(const map of [completionDrafts,notificationDrafts,formSelection,rowSelection]){
           if(mode==='replace')map.clear();
           else if(targetPlanner)map.delete(targetPlanner);
         }
@@ -995,6 +1163,7 @@ function hideOutput(){
 function redrawNotifications(){
   hideOutput();
   $('.notification-section').outerHTML=notifications(planner());
+  storageLabel();
 }
 function redrawScheduleStatus(){
   const panel=$('.schedule-status');
@@ -1009,8 +1178,13 @@ document.addEventListener('focusin',e=>{if(e.target.id==='label-search'&&pop?.ki
 document.addEventListener('pointerdown',e=>{if(pop&&!e.target.closest('#popover')&&!e.target.closest('[data-action="sort"],[data-action="filter"],[data-action="bucket-sort"],[data-action="task-options"],#label-search'))closePop();});
 document.addEventListener('submit',e=>{e.preventDefault();const f=e.target,kind=f.dataset.form,p=planner();(async()=>{
   if(kind==='task'){closeTask();return;}
-if(kind==='project-modal'){
-    const {name,description,start,due,labelId}=Object.fromEntries(new FormData(f));
+  if(kind==='project-modal'){
+    const values=new FormData(f);
+    if(modal.initialValues&&[...values].every(([key,value])=>modal.initialValues.get(key)===value)){
+      closeModal({discard:true});
+      return;
+    }
+    const {name,description,start,due,labelId}=Object.fromEntries(values);
     if(!name.trim())throw Error('목표 이름을 입력하세요.');
     if(start&&due&&start>due)throw Error('기한은 시작일과 같거나 그 이후여야 합니다.');
     const existing=p.projects.find(x=>x.id===modal.id);
@@ -1023,7 +1197,7 @@ if(kind==='project-modal'){
       p.projects.push(project);
       showClosedProjects=false;
     }
-    closeModal();
+    closeModal({discard:true});
     render();
     if(boardEdit)focusBoardProjectEdit(project.id);
     if(statusChanged)focusProjectStatus();
@@ -1031,8 +1205,8 @@ if(kind==='project-modal'){
   }
   if(kind==='planner-modal'){const name=f.elements.name.value.trim(),description=f.elements.description.value.trim();if(!name)throw Error('Planner 이름을 입력하세요.');if(modal.id){const p=state.planners.find(p=>p.id===modal.id);p.name=name;p.description=description;}else{const p=newPlanner(name,description);state.planners.push(p);selected=p.id;view='board';}closeModal();render();await persist('Planner 저장 완료');}
   if(kind==='bucket-modal'||kind==='bucket-add'){const name=f.elements.name.value.trim();if(!name)return;p.buckets.push({id:uid(),name,sort:null});if(kind==='bucket-modal')closeModal();render();await persist('버킷 추가 완료');}
-  if(kind==='planner-settings'){p.name=f.elements.name.value.trim()||'Kanban Planner';p.description=f.elements.description.value.trim()||'Kanban planner';render();await persist();}
-  if(kind==='completion'){const action=f.elements.action.value;if(action==='label'&&!p.labels.length)throw Error('대상 레이블을 먼저 추가하세요.');p.completion={action,bucket:f.elements.bucket?.value||p.completion.bucket,label:f.elements.label?.value||p.completion.label};await persist('완료 액션 저장 완료');}
+  if(kind==='planner-settings')await savePlannerIdentity(p,f);
+  if(kind==='completion')await applyCompletion(p);
   if(kind==='label-add'){p.labels.push({id:uid(),name:f.elements.name.value.trim(),color:f.elements.color.value});render();await persist('레이블 추가 완료');}
   if(kind==='label-rename'){const l=p.labels.find(l=>l.id===f.dataset.id);l.name=f.elements.name.value.trim();captureTask();renderTask();renderPopover();await persist('레이블 이름 저장 완료');}
 })().catch(err=>notify(err.message,true));});
@@ -1065,7 +1239,8 @@ document.addEventListener('input',e=>{
 });
 document.addEventListener('input',e=>{const el=e.target,p=planner();if(el.id==='task-due')updateTaskDueHint(p);if(el.matches('#task-notes'))autoGrow(el);if(el.matches('#label-search')){if(!pop||pop.kind!=='labels')openPop('labels',el);else renderPopover();}if(el.matches('[data-width],[data-width-number]')){const n=Math.min(480,Math.max(260,Math.round((+el.value||340)/10)*10));document.documentElement.style.setProperty('--bucket-width',n+'px');if(el.matches('[data-width]'))$('[data-width-number]').value=n;else $('[data-width]').value=n;}if(el.dataset.labelColor){p.labels.find(l=>l.id===el.dataset.labelColor).color=el.value;$(`[data-label-id="${el.dataset.labelColor}"]`).forEach(chip=>chip.style.setProperty('--label',el.value));}if(el.matches('[data-color]'))document.documentElement.style.setProperty(['--site','--sidebar','--bucket','--popup'][+el.dataset.color],el.value);if(el.matches('[data-n],[data-row],[data-message-field],[data-message-section]')){notificationInput(el);hideOutput();}});
 function notificationInput(el){
-  const p=planner(),n=draft(p),value=el.type==='checkbox'?el.checked:el.value;
+  const p=planner(),edit=notificationEdit(p),n=edit.value,value=el.type==='checkbox'?el.checked:el.value;
+  edit.error='';
   if(el.dataset.messageField){
     editingMessageForm(p)[el.dataset.messageField]=value;
     if(el.dataset.messageField==='name'){
@@ -1094,6 +1269,7 @@ function notificationInput(el){
       selection.innerHTML=opts(n.rows.map(row=>[row.id,row.time]),selection.value);
     }
   }
+  storageLabel();
 }
 document.addEventListener('change',e=>{const el=e.target,p=planner();(async()=>{
   if(el.id==='backup-import-mode')updateBackupMode();
@@ -1118,6 +1294,12 @@ document.addEventListener('change',e=>{const el=e.target,p=planner();(async()=>{
     $('[data-calendar-completed]').focus({preventScroll:true});
     await persist('');
   }
+  if(el.matches('[data-list-completed]')){
+    p.listCompleted=el.checked;
+    render();
+    $('[data-list-completed]').focus({preventScroll:true});
+    await persist('');
+  }
   if(el.matches('[data-timeline-completed]')){
     const scroll=$('.timeline-scroll').scrollLeft;
     p.timelineCompleted=el.checked;
@@ -1131,7 +1313,13 @@ document.addEventListener('change',e=>{const el=e.target,p=planner();(async()=>{
     render();
     $('[data-board-include-closed]')?.focus({preventScroll:true});
   }
-  if(el.matches('[data-completion-action]'))$('#completion-target').innerHTML=completionTarget(p,el.value);
+  if(el.matches('[data-form="completion"] select')){
+    const edit=completionEdit(p);
+    edit.value[el.name]=el.value;
+    edit.error='';
+    if(el.matches('[data-completion-action]'))$('#completion-target').innerHTML=completionTarget(p,edit.value);
+    storageLabel();
+  }
   if(el.matches('[data-width],[data-width-number]')){p.appearance.width=Math.min(480,Math.max(260,Math.round((+el.value||340)/10)*10));render();await persist('');}
   if(el.dataset.color){p.appearance.colors[+el.dataset.color]=el.value;await persist('');}
   if(el.dataset.labelColor){p.labels.find(l=>l.id===el.dataset.labelColor).color=el.value;if(task){captureTask();const anchor=pop?.anchor;renderTask();if(anchor){pop={kind:'labels',id:'',anchor};renderPopover();}}else render();await persist('');}
@@ -1153,7 +1341,14 @@ document.addEventListener('change',e=>{const el=e.target,p=planner();(async()=>{
   if(el.matches('[data-message-preview-channel]')){messagePreviewChannel=el.value;hideOutput();}
   if(el.dataset.taskCheck){captureTask();renderTask();}
 })().catch(err=>notify(err.message,true));});
-document.addEventListener('focusout',e=>{const el=e.target;if(el.matches('[data-bucket-name],[data-manage-bucket]')){const b=planner().buckets.find(b=>b.id===(el.dataset.bucketName||el.dataset.manageBucket)),name=el.value.trim();if(name&&name!==b.name){b.name=name;persist('').catch(()=>{});}else el.value=b.name;}});
+document.addEventListener('focusout',e=>{
+  const el=e.target;
+  if(el.matches('[data-form="planner-settings"] input'))savePlannerIdentity(planner(),el.form)?.catch(()=>{});
+  if(el.matches('[data-bucket-name],[data-manage-bucket]')){
+    const b=planner().buckets.find(b=>b.id===(el.dataset.bucketName||el.dataset.manageBucket)),name=el.value.trim();
+    if(name&&name!==b.name){b.name=name;persist('').catch(()=>{});}else el.value=b.name;
+  }
+});
 document.addEventListener('keydown',e=>{
   if(e.isComposing)return;
   if(e.key==='Escape'&&!$('#confirm')){
@@ -1170,7 +1365,7 @@ document.addEventListener('keydown',e=>{
     if(e.target.id==='check-add-input'){e.preventDefault();handleAction('check-add').catch(err=>notify(err.message,true));}
     if(e.target.id==='label-search'){e.preventDefault();const first=$('[data-action="task-label-toggle"]');if(first)first.click();}
     if(e.target.id==='new-label-name'){e.preventDefault();handleAction('task-label-add').catch(err=>notify(err.message,true));}
-    if(e.target.matches('[data-bucket-name],[data-manage-bucket]')){e.preventDefault();e.target.blur();}
+    if(e.target.matches('[data-form="planner-settings"] input,[data-bucket-name],[data-manage-bucket],[data-label-name]')){e.preventDefault();e.target.blur();}
     if(e.target.matches('[data-task]')){e.preventDefault();openTask(e.target.dataset.task);}
   }
   if(e.key==='Tab'&&(modal||$('#confirm'))){const root=$('#confirm')||$('.dialog'),focusable=$$('button:not(:disabled),input:not(:disabled),select,textarea,a[href],summary',root).filter(el=>el.getClientRects().length&&(!el.closest('details:not([open])')||el.matches('summary')));const first=focusable[0],last=focusable.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}
@@ -1192,12 +1387,13 @@ document.addEventListener('pointerup',()=>{if(!drag)return;const d=drag,p=planne
 });
 document.addEventListener('pointercancel',cleanDrag);
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&drag){cleanDrag();suppressClick=Date.now()+400;}},true);window.addEventListener('blur',cleanDrag);
-window.addEventListener('beforeunload',e=>{if(modal?.kind==='task'||modal?.applying||saving||saveError){e.preventDefault();e.returnValue='';}});
+window.addEventListener('beforeunload',e=>{if(modal?.kind==='task'||modal?.applying||saving||saveError||hasSettingsDrafts()){e.preventDefault();e.returnValue='';}});
 window.addEventListener('resize',()=>{if(pop)renderPopover();});
 wideProjectView.addEventListener('change',()=>{if(projectPreview)render();});
 try{acceptWorkspace(await api('/api/state'));render();}catch(e){$('#app').innerHTML=`<div class="startup-error"><h1>Planner를 불러올 수 없습니다.</h1><p>${esc(e.message)}</p><p>서버가 실행 중인지 확인한 후 새로고침하세요.</p></div>`;}
 
-const canRefresh=()=>state&&!saving&&!modal&&!saveError&&!busyActions&&!$('#confirm');
+const canRefresh=()=>state&&!saving&&!modal&&!saveError&&!busyActions&&!$('#confirm')&&
+  !document.activeElement?.matches('[data-form="planner-settings"] input,[data-manage-bucket],[data-label-name]');
 let refreshing=false;
 setInterval(async()=>{
   if(refreshing||!canRefresh())return;

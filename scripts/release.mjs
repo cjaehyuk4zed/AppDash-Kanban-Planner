@@ -9,6 +9,7 @@ export const releaseFiles=[
   '.gitignore','.github/workflows/test.yml','README.md','package.json','Start-Kanban.bat','WindowsFolderPicker.cs',
   'server.mjs','engine.mjs','notification-migration.mjs','report-files.mjs','workspace-backup.mjs',
   'public/index.html','public/app.mjs','public/model.mjs','public/styles.css','public/icon.svg',
+  'public/manifest.webmanifest','public/icon-44.png','public/icon-192.png','public/icon-512.png',
   'scripts/setup-appdash.mjs','scripts/release.mjs','test/model.test.mjs','test/report-files.test.mjs',
   'test/server.test.mjs','test/workspace-backup.test.mjs'
 ];

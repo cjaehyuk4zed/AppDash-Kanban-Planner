@@ -146,5 +146,50 @@ test('real HTTP lifecycle, readiness, persistence/restart, revision conflict, pr
   const final=(await req('/api/state')).data;
   assert.equal(final.state.planners[0].tasks[0].title,'Task edit while notification waits');
   assert.equal(final.state.planners[0].notifications.export,false);
+
+  const trial=clone(newSettings);
+  trial.forms[0].sections[0].status='incomplete';
+  trial.rows[0].format='detail';
+  trial.teams=true;
+  const beforeTrial=(await req('/api/state')).data;
+  const storeBeforeTrial=await fs.readFile(storePath,'utf8');
+  const sendTrial=(channel,row=trial.rows[0].id)=>action({action:'notification-test',channel,row,notifications:trial});
+  assert.equal((await sendTrial('teams','missing')).status,400);
+  assert.equal((await sendTrial('export')).status,400);
+  const sample=await sendTrial('teams');
+  assert.equal(sample.status,200);
+  assert.equal(sample.data.text,'테스트 전송 완료');
+  assert.match(await fs.readFile(sentFile,'utf8'),/Task edit while notification waits/);
+  const failedSample=await sendTrial('outlook');
+  assert.equal(failedSample.status,502);
+  assert.match(failedSample.data.error,/^테스트 전송 실패/);
+  assert.doesNotMatch(failedSample.data.error,/example\.invalid|설정 저장 완료/);
+  assert.equal((await req('/api/state')).data.revision,beforeTrial.revision);
+  assert.equal(await fs.readFile(storePath,'utf8'),storeBeforeTrial);
+
+  const otherPlanner=newPlanner('Other planner');
+  assert.equal((await req('/api/planner','PUT',{planner:otherPlanner,version:null})).status,200);
+  const beforeToggle=(await req('/api/state')).data;
+  const beforeToggleRaw=await fs.readFile(storePath,'utf8');
+  const existingPlanner=beforeToggle.state.planners.find(p=>p.id===final.state.planners[0].id);
+  assert.equal(Object.hasOwn(existingPlanner,'listCompleted'),false);
+  await stop();
+  await start();
+  const afterUpgrade=(await req('/api/state')).data;
+  assert.equal(afterUpgrade.revision,beforeToggle.revision);
+  assert.deepEqual(afterUpgrade.state,beforeToggle.state);
+  assert.equal(await fs.readFile(storePath,'utf8'),beforeToggleRaw);
+
+  const version=afterUpgrade.plannerVersions[existingPlanner.id];
+  const setCompletedVisibility=listCompleted=>req('/api/planner','PUT',{planner:{...existingPlanner,listCompleted},version});
+  assert.equal((await setCompletedVisibility('false')).status,400);
+  assert.equal((await setCompletedVisibility(false)).status,200);
+  await stop();
+  await start();
+  const afterToggle=(await req('/api/state')).data;
+  assert.equal(afterToggle.revision,afterUpgrade.revision+1);
+  assert.deepEqual(afterToggle.state.planners.find(p=>p.id===existingPlanner.id),{...existingPlanner,listCompleted:false});
+  assert.deepEqual(afterToggle.state.planners.find(p=>p.id===otherPlanner.id),otherPlanner);
+  assert.equal(afterToggle.plannerVersions[otherPlanner.id],afterUpgrade.plannerVersions[otherPlanner.id]);
  }finally{await stop();for(const dir of ['data','reports','backups']){const target=path.resolve(base,dir,instance);assert.ok(target.startsWith(base+path.sep)&&target.includes(instance));await fs.rm(target,{recursive:true,force:true});}}
 });

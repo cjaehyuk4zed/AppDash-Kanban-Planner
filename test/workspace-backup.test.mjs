@@ -76,6 +76,26 @@ test('clean release starts, keeps data in place across code updates, and imports
   const state=async()=>(await request('/api/state')).data;
   try{
     await start();
+    const page=await fetch(url+'/');
+    assert.match(await page.text(),/rel="manifest" href="\/manifest\.webmanifest"/);
+    const manifestResponse=await fetch(url+'/manifest.webmanifest');
+    assert.equal(manifestResponse.status,200);
+    assert.match(manifestResponse.headers.get('content-type'),/^application\/manifest\+json\b/);
+    const manifest=await manifestResponse.json();
+    assert.equal(manifest.name,'Kanban Planner');
+    assert.equal(manifest.display,'standalone');
+    assert.ok(manifest.icons.some(icon=>icon.src==='/icon.svg'&&icon.sizes==='any'));
+    for(const size of [44,192,512]){
+      const icon=manifest.icons.find(icon=>icon.sizes===`${size}x${size}`);
+      assert.ok(icon);
+      const image=await fetch(new URL(icon.src,url));
+      assert.equal(image.status,200);
+      assert.equal(image.headers.get('content-type'),'image/png');
+      const png=Buffer.from(await image.arrayBuffer());
+      assert.equal(png.subarray(12,16).toString(),'IHDR');
+      assert.deepEqual([png.readUInt32BE(16),png.readUInt32BE(20)],[size,size]);
+    }
+
     const first=await state();
     assert.equal(first.state.planners[0].tasks.length,3);
     for(const dir of [reports,backups])assert.ok((await fs.stat(dir)).isDirectory());

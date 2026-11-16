@@ -14,7 +14,7 @@ export function parseDate(text) {
   if (y<1 || dt.getFullYear()!==y || dt.getMonth()!==mo-1 || dt.getDate()!==d) throw Error('실제 존재하는 날짜를 입력하세요.');
   return `${m[1]}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
 }
-export const sorts = [['manual','수동'],['priorityHigh','우선순위 높은순'],['priorityLow','우선순위 낮은순'],['dueAsc','기한 빠른순'],['dueDesc','기한 늦은순'],['startAsc','시작일 빠른순'],['completedAsc','완료 날짜 빠른순'],['completedDesc','완료 날짜 늦은순'],['title','제목순'],['created','최근 생성순'],['incomplete','미완료 먼저']];
+export const sorts = [['manual','수동'],['dueAsc','기한 빠른순'],['dueDesc','기한 늦은순'],['priorityHigh','우선순위 높은순'],['priorityLow','우선순위 낮은순'],['startAsc','시작일 빠른순'],['completedAsc','완료 날짜 빠른순'],['completedDesc','완료 날짜 늦은순'],['title','제목순'],['created','최근 생성순'],['incomplete','미완료 먼저']];
 export const sectionStatuses=[['all','전체'],['incomplete','미완료'],['complete','완료']];
 export const dueConditions=[['all','전체'],['none','기한 없음'],['before','기한 초과'],['today','오늘'],['tomorrow','내일'],['next','2~7일 후'],['week','오늘부터 7일 후'],['yesterday','어제~오늘'],['recent','최근 7일'],['range','기간 지정']];
 export const notificationFormats=[['summary','요약'],['detail','상세']];
