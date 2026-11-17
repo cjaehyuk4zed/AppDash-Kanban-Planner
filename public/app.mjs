@@ -660,9 +660,9 @@ function openProject(id,boardEdit=false){
       <form data-form="project-modal">
         ${field('목표 이름',input('name="name" required maxlength="160"',project.name))}
         ${field('설명',`<textarea name="description" maxlength="300" rows="${existing?1:3}">${esc(project.description)}</textarea>`)}
-        ${existing?field('메모','<textarea name="notes" maxlength="100000" rows="4"></textarea>'):''}
         ${status.projectLabels?field('목표 레이블',select('name="labelId" aria-label="목표 레이블" aria-describedby="project-label-hint"',[['','레이블 없음'],...p.labels.map(l=>[l.id,labelName(p,l.id)])],project.labelId??'')+`<small id="project-label-hint" class="muted">소속 Task에 자동으로 적용됩니다.</small>`):''}
         <div class="two-col">${field('시작일',input('name="start"',project.start,'date'))}${field('기한',input('name="due"',project.due,'date'))}</div>
+        ${existing?field('메모','<textarea id="project-notes" name="notes" maxlength="100000" rows="4"></textarea>'):''}
         <div class="dialog-actions">${btn('modal-cancel','취소')}<button type="submit" class="primary">저장</button></div>
       </form>
     </section>
@@ -670,6 +670,7 @@ function openProject(id,boardEdit=false){
   const form=$('[data-form="project-modal"]');
   if(existing){
     form.elements.notes.value=project.notes??'';
+    autoGrow(form.elements.notes);
     modal.initialValues=new FormData(form);
   }
   form.elements.name.focus();
@@ -766,7 +767,12 @@ function closeModal({discard=false}={}){
   if(previous?.boardEdit)focusBoardProjectEdit(previous.id);
   if(previous?.kind==='backup-review')previous.trigger.focus({preventScroll:true});
 }
-function autoGrow(el){if(!el)return;el.style.height='auto';el.style.height=Math.max(130,el.scrollHeight)+'px';}
+function autoGrow(el){
+  if(!el)return;
+  el.style.height='auto';
+  const borders=el.offsetHeight-el.clientHeight;
+  el.style.height=(el.scrollHeight+borders)+'px';
+}
 function closePop(){pop=null;$('#popover').innerHTML='';$$(':is([data-action="sort"],[data-action="filter"],[data-action="bucket-sort"],[data-action="task-options"],#label-search)[aria-expanded="true"]').forEach(e=>e.setAttribute('aria-expanded','false'));}
 function openPop(kind,button,id=''){if(pop?.kind===kind&&pop.id===id&&pop.trigger===button){closePop();return;}closePop();pop={kind,id,trigger:button,anchor:button.getBoundingClientRect()};button.setAttribute('aria-expanded','true');renderPopover();}
 function dateRangeFilter({label,from,to},filters){
@@ -1309,6 +1315,7 @@ document.addEventListener('beforetoggle',e=>{
 },true);
 document.addEventListener('input',e=>{
   if(e.target.matches('#project-task-search,[data-project-link-task]'))updateProjectTaskResults($('#project-task-dropdown'));
+  if(e.target.matches('#project-notes'))autoGrow(e.target);
 });
 document.addEventListener('input',e=>{const el=e.target,p=planner();if(el.id==='task-due')updateTaskDueHint(p);if(el.matches('#task-notes'))autoGrow(el);if(el.matches('#label-search')){if(!pop||pop.kind!=='labels')openPop('labels',el);else renderPopover();}if(el.matches('[data-width],[data-width-number]')){const n=Math.min(480,Math.max(260,Math.round((+el.value||340)/10)*10));document.documentElement.style.setProperty('--bucket-width',n+'px');if(el.matches('[data-width]'))$('[data-width-number]').value=n;else $('[data-width]').value=n;}if(el.dataset.labelColor){p.labels.find(l=>l.id===el.dataset.labelColor).color=el.value;$(`[data-label-id="${el.dataset.labelColor}"]`).forEach(chip=>chip.style.setProperty('--label',el.value));}if(el.matches('[data-color]'))document.documentElement.style.setProperty(['--site','--sidebar','--bucket','--popup'][+el.dataset.color],el.value);if(el.matches('[data-n],[data-row],[data-message-field],[data-message-section]')){notificationInput(el);hideOutput();}});
 function notificationInput(el){
@@ -1491,7 +1498,10 @@ document.addEventListener('pointerup',()=>{if(!drag)return;const d=drag,p=planne
 document.addEventListener('pointercancel',cleanDrag);
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&drag){cleanDrag();suppressClick=Date.now()+400;}},true);window.addEventListener('blur',cleanDrag);
 window.addEventListener('beforeunload',e=>{if(modal?.kind==='task'||modal?.applying||saving||saveError||hasSettingsDrafts()){e.preventDefault();e.returnValue='';}});
-window.addEventListener('resize',()=>{if(pop)renderPopover();});
+window.addEventListener('resize',()=>{
+  if(pop)renderPopover();
+  if(modal?.kind==='project')autoGrow($('#project-notes'));
+});
 wideProjectView.addEventListener('change',()=>{if(projectPreview)render();});
 try{acceptWorkspace(await api('/api/state'));render();}catch(e){$('#app').innerHTML=`<div class="startup-error"><h1>Planner를 불러올 수 없습니다.</h1><p>${esc(e.message)}</p><p>서버가 실행 중인지 확인한 후 새로고침하세요.</p></div>`;}
 
