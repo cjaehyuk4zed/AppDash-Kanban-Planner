@@ -91,8 +91,11 @@ button[aria-expanded="true"]{background:#e2ece4;border-color:#91a68d}.task-card{
 .project-lane{min-width:0}
 .project-lane>summary{cursor:pointer;padding:9px 12px;margin:0 16px 8px 0;background:#e7eee5;border-radius:8px;color:#315d50;overflow-wrap:anywhere}
 .project-lane>summary span{margin-inline-start:12px;font-size:calc(12px + var(--font-size-offset))}
-.project-lane-editable summary{padding-inline-end:76px;min-height:43px}
-.project-lane-edit{position:absolute;top:5px;right:22px;padding:6px 10px}
+.project-lane-editable summary{padding-inline-end:calc(5em + 28px);min-height:43px}
+.project-lane-edit{position:absolute;top:5px;right:22px;padding:6px 10px;white-space:nowrap}
+.dialog.project-edit-dialog{max-width:614px}
+.dialog.project-edit-dialog input[name="name"]{font-size:calc(14px + 1pt + var(--font-size-offset));font-weight:700}
+.project-edit-dialog textarea[name="description"]{resize:none;overflow-y:auto}
 .project-lane .board-track{min-height:0;padding-bottom:10px}
 .lane-bucket-name{flex:1;min-width:0;overflow-wrap:anywhere;font-size:calc(13px + var(--font-size-offset))}
 .timeline-project{background:#e1eee7}

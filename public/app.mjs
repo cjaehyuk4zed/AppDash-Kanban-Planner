@@ -221,7 +221,7 @@ function projectsView(p){
       <progress max="${s.total||1}" value="${s.done}" aria-label="${progressText(s)}"></progress>
       <div class="project-panel-footer">
         <p class="muted">일정 ${dateText(project.start)} ~ ${dateText(project.due)}</p>
-        <div class="row-actions">${btn('project-open','보드 열기',{id:project.id,cls:'primary'})}${btn('project-edit','편집',{id:project.id})}${btn('project-close',project.closed?'재개':'완료',{id:project.id})}${ib('project-delete','trash','목표 삭제',project.id)}</div>
+        <div class="row-actions">${btn('project-open','보드 열기',{id:project.id,cls:'primary'})}${btn('project-edit','목표 편집',{id:project.id})}${btn('project-close',project.closed?'재개':'완료',{id:project.id})}${ib('project-delete','trash','목표 삭제',project.id)}</div>
       </div>
     </article>`;
   }).join('')}</div>`;
@@ -342,7 +342,7 @@ function board(p){
     const key=projectKey(p,'board',project.id);
     const edit=project.id!=='none';
     return `<div class="project-lane-group${edit?' project-lane-editable':''}">
-      ${edit?btn('board-project-edit','편집',{id:project.id,cls:'project-lane-edit',extra:`aria-label="${esc(project.name)} · 편집" aria-haspopup="dialog"`}):''}
+      ${edit?btn('board-project-edit','목표 편집',{id:project.id,cls:'project-lane-edit',extra:`aria-label="${esc(project.name)} · 목표 편집" aria-haspopup="dialog"`}):''}
       <details class="project-lane" data-project-lane="${key}" ${collapsedProjects.has(key)?'':'open'}><summary><strong>${esc(project.name)}</strong><span>${progressText(projectStats(p.tasks.filter(t=>matchesProject(t.projectId,project.id))))}</span></summary>${boardTrack(p,tasks,project.id)}</details>
     </div>`;
   }).join('')}</div>`;
@@ -654,9 +654,24 @@ function openPlannerModal(id=null){const p=state.planners.find(p=>p.id===id);mod
 function openProject(id,boardEdit=false){
   const p=planner(),existing=p.projects.find(x=>x.id===id),project=existing||{...newProject(),start:day()};
   modal={kind:'project',id:existing?.id??null,boardEdit};
-  $('#overlay').innerHTML=`<div class="modal-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="modal-title" class="dialog small"><div class="dialog-header"><h2 id="modal-title">${existing?'목표 편집':'새 목표'}</h2>${ib('project-modal-close','close',existing?'닫기 · 자동 저장':'닫기')}</div><form data-form="project-modal">${field('목표 이름',input('name="name" required maxlength="160"',project.name))}${field('설명',`<textarea name="description" maxlength="300" rows="3">${esc(project.description)}</textarea>`)}${status.projectLabels?field('목표 레이블',select('name="labelId" aria-label="목표 레이블" aria-describedby="project-label-hint"',[['','레이블 없음'],...p.labels.map(l=>[l.id,labelName(p,l.id)])],project.labelId??'')+`<small id="project-label-hint" class="muted">소속 Task에 자동으로 적용됩니다.</small>`):''}<div class="two-col">${field('시작일',input('name="start"',project.start,'date'))}${field('기한',input('name="due"',project.due,'date'))}</div><div class="dialog-actions">${btn('modal-cancel','취소')}<button type="submit" class="primary">저장</button></div></form></section></div>`;
+  $('#overlay').innerHTML=`<div class="modal-backdrop">
+    <section role="dialog" aria-modal="true" aria-labelledby="modal-title" class="dialog small${existing?' project-edit-dialog':''}">
+      <div class="dialog-header"><h2 id="modal-title">${existing?'목표 편집':'새 목표'}</h2>${ib('project-modal-close','close',existing?'닫기 · 자동 저장':'닫기')}</div>
+      <form data-form="project-modal">
+        ${field('목표 이름',input('name="name" required maxlength="160"',project.name))}
+        ${field('설명',`<textarea name="description" maxlength="300" rows="${existing?1:3}">${esc(project.description)}</textarea>`)}
+        ${existing?field('메모','<textarea name="notes" maxlength="100000" rows="4"></textarea>'):''}
+        ${status.projectLabels?field('목표 레이블',select('name="labelId" aria-label="목표 레이블" aria-describedby="project-label-hint"',[['','레이블 없음'],...p.labels.map(l=>[l.id,labelName(p,l.id)])],project.labelId??'')+`<small id="project-label-hint" class="muted">소속 Task에 자동으로 적용됩니다.</small>`):''}
+        <div class="two-col">${field('시작일',input('name="start"',project.start,'date'))}${field('기한',input('name="due"',project.due,'date'))}</div>
+        <div class="dialog-actions">${btn('modal-cancel','취소')}<button type="submit" class="primary">저장</button></div>
+      </form>
+    </section>
+  </div>`;
   const form=$('[data-form="project-modal"]');
-  if(existing)modal.initialValues=new FormData(form);
+  if(existing){
+    form.elements.notes.value=project.notes??'';
+    modal.initialValues=new FormData(form);
+  }
   form.elements.name.focus();
 }
 function focusBoardProjectEdit(id){
@@ -1241,7 +1256,7 @@ document.addEventListener('submit',e=>{e.preventDefault();const f=e.target,kind=
       closeModal({discard:true});
       return;
     }
-    const {name,description,start,due,labelId}=Object.fromEntries(values);
+    const {name,description,notes,start,due,labelId}=Object.fromEntries(values);
     if(!name.trim())throw Error('목표 이름을 입력하세요.');
     if(start&&due&&start>due)throw Error('기한은 시작일과 같거나 그 이후여야 합니다.');
     const existing=p.projects.find(x=>x.id===modal.id);
@@ -1249,6 +1264,7 @@ document.addEventListener('submit',e=>{e.preventDefault();const f=e.target,kind=
     const statusChanged=!existing&&showClosedProjects;
     const project=existing||newProject();
     Object.assign(project,{name:name.trim(),description:description.trim(),start,due});
+    if(notes!==undefined)project.notes=notes;
     if(labelId!==undefined)project.labelId=labelId||null;
     if(!existing){
       p.projects.push(project);

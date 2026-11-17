@@ -103,6 +103,9 @@ test('real HTTP lifecycle, readiness, persistence/restart, revision conflict, pr
   assert.equal((await req('/api/state','PUT',invalidProject)).status,400);
   const invalidLabel=clone(projectState);invalidLabel.state.planners[0].projects[0].labelId='missing-label';
   assert.equal((await req('/api/state','PUT',invalidLabel)).status,400);
+  const invalidNotes=clone(projectState);invalidNotes.state.planners[0].projects[0].notes=[];
+  assert.equal((await req('/api/state','PUT',invalidNotes)).status,400);
+  project.notes='\nFirst line\n\nSecond line\n';
   assert.equal((await req('/api/state','PUT',projectState)).status,200);
   await stop();await start();const again=(await req('/api/state')).data;assert.equal(again.state.planners[0].tasks[0].title,'Saved through API');assert.equal(again.state.planners[0].tasks[0].projectId,project.id);assert.deepEqual(again.state.planners[0].projects,[project]);assert.equal(again.state.planners[0].boardGrouped,true);assert.deepEqual(again.state.planners[0].notifications.forms,p.notifications.forms);assert.equal((await fetch(url+'/data/store.json')).status,404);assert.equal((await fetch(url+'/reports/%2e%2e%2fdata%2fstore.json')).status,400);
   assert.equal((await fs.readdir(backupDir)).filter(name=>name.startsWith('store.before-message-forms-')).length,1);

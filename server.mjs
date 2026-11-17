@@ -58,6 +58,7 @@ function validateState(s){
     for(const project of p.projects){
       id(project.id);
       if(['all','none'].includes(project.id)||!isString(project.name,160)||!project.name.trim()||!isString(project.description,300)||typeof project.closed!=='boolean')fail();
+      if(project.notes!==undefined&&!isString(project.notes))fail();
       for(const d of ['start','due'])if(!isString(project[d],10)||parseDate(project[d])!==project[d])fail();
       if(project.start&&project.due&&project.start>project.due)fail();
       if(project.completed!==undefined){

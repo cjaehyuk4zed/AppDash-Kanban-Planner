@@ -20,7 +20,7 @@ const fixture=async t=>{
 const readJSON=async file=>JSON.parse(await fs.readFile(file,'utf8'));
 const sourceStore=()=>{
   const planner=newPlanner('Imported Planner');
-  const goal={...newProject(),name:'Preserved goal',labelId:planner.labels[0].id,due:'2026-11-24'};
+  const goal={...newProject(),name:'Preserved goal',labelId:planner.labels[0].id,due:'2026-11-24',notes:'\nGoal note\n\nSecond line\n'};
   planner.projects.push(goal);
   const task=saveTask(planner,{...newTask(planner,planner.buckets[0].id,goal.id),title:'Original task',labels:[planner.labels[1].id]});
   const state={ui:{collapsed:false},planners:[planner]};
@@ -139,6 +139,7 @@ test('clean release starts, keeps data in place across code updates, and imports
     assert.equal(await fs.readFile(path.join(backups,archive,'imported-backups','backups','old-backup.json'),'utf8'),'old app backup');
 
     const live=await state(),oldPlanner=live.state.planners[0];
+    assert.equal(oldPlanner.projects[0].notes,incoming.state.planners[0].projects[0].notes);
     assert.equal(oldPlanner.filters.from,incoming.state.planners[0].filters.from);
     assert.equal(oldPlanner.filters.dueFrom,undefined);
     assert.equal(oldPlanner.filters.dueTo,undefined);
@@ -153,6 +154,9 @@ test('clean release starts, keeps data in place across code updates, and imports
     assert.match(JSON.stringify(complete.data),/teams-private/);
     assert.equal((await backup({action:'preview',kind:'file',backup:{...redacted.data,schema:999}})).status,400);
     assert.equal((await backup({action:'preview',kind:'file',backup:{...redacted.data,runtime:{...redacted.data.runtime,journal:[{}]}}})).status,400);
+    const legacyBackup=structuredClone(redacted.data);
+    delete legacyBackup.state.planners[0].projects[0].notes;
+    assert.equal((await backup({action:'preview',kind:'file',backup:legacyBackup})).status,200);
     const filePreview=await backup({action:'preview',kind:'file',backup:redacted.data});
     assert.equal(filePreview.status,200);
     assert.equal((await backup({action:'apply',kind:'file',mode:'append',revision:filePreview.data.currentRevision,backup:redacted.data})).status,200);
@@ -161,6 +165,7 @@ test('clean release starts, keeps data in place across code updates, and imports
     assert.notEqual(copied.id,kept.id);
     assert.equal(copied.tasks[0].projectId,copied.projects[0].id);
     assert.equal(copied.tasks[0].completedByProject,copied.projects[0].id);
+    assert.equal(copied.projects[0].notes,oldPlanner.projects[0].notes);
     assert.equal(copied.tasks[0].labels[0],copied.labels[1].id);
     assert.equal(copied.filters.project,copied.projects[0].id);
     assert.equal(copied.filters.from,oldPlanner.filters.from);
