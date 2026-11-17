@@ -347,7 +347,41 @@ function board(p){
     </div>`;
   }).join('')}</div>`;
 }
-function calendar(p){const [y,m]=month.split('-').map(Number),first=new Date(y,m-1,1,12);first.setDate(first.getDate()-first.getDay());const tasks=sortTasks(p,filtered(p).filter(t=>p.calendarCompleted||!t.completed));const days=Array.from({length:42},(_,i)=>addDays(day(first),i));return `<div class="view-toolbar"><div class="period-nav">${btn('month-prev','‹',{title:'이전 달'})}<h2>${y}년 ${m}월</h2>${btn('month-next','›',{title:'다음 달'})}${btn('month-today','오늘')}</div>${check('data-calendar-completed',p.calendarCompleted,'완료 Task 표시')}</div><div class="calendar-grid">${['일','월','화','수','목','금','토'].map(x=>`<div class="weekday">${x}</div>`).join('')}${days.map(d=>`<div class="calendar-day ${d.slice(0,7)!==month?'outside':''} ${d===day()?'today':''}"><div class="day-number"><span>${+d.slice(8)}</span><small>${d}</small></div>${tasks.filter(t=>t.start===d||taskDue(p,t)===d).map(t=>btn('task-open',`<small>${t.start===d&&taskDue(p,t)===d?'시작 · 기한':t.start===d?'시작':'기한'}</small>${esc(t.title)}`,{id:t.id,cls:`calendar-task ${t.completed?'completed':''}`,extra:`style="--task-color:${taskColor(p,t)}"`})).join('')}</div>`).join('')}</div>`;}
+function calendar(p){
+  const [y,m]=month.split('-').map(Number),first=new Date(y,m-1,1,12),today=day();
+  first.setDate(first.getDate()-first.getDay());
+  const showStart=p.calendarShowStart??true;
+  const days=new Map(Array.from({length:42},(_,i)=>[addDays(day(first),i),{dueCards:[],startCards:[],startLines:[]}]));
+  const tasks=sortTasks(p,filtered(p).filter(task=>p.calendarCompleted||!task.completed));
+  for(const task of tasks){
+    const due=taskDue(p,task);
+    days.get(due)?.dueCards.push({task,label:showStart&&task.start===due?'시작 · 기한':'기한'});
+    const startDay=days.get(task.start);
+    if(!showStart||!startDay||task.start===due)continue;
+    if(due)startDay.startLines.push(task);
+    else startDay.startCards.push(task);
+  }
+  const entry=(task,label,compact=false)=>btn('task-open',`<small>${label}</small><span class="calendar-task-title">${esc(task.title)}</span>`,{
+    id:task.id,cls:`calendar-task${compact?' calendar-start-line':''}${task.completed?' completed':''}`,
+    extra:`aria-label="${esc(label+' '+task.title)}" ${compact?`title="${esc(task.title)}"`:`style="--task-color:${taskColor(p,task)}"`}`
+  });
+  return `<div class="view-toolbar">
+    <div class="period-nav">${btn('month-prev','‹',{title:'이전 달'})}<h2>${y}년 ${m}월</h2>${btn('month-next','›',{title:'다음 달'})}${btn('month-today','오늘')}</div>
+    <div class="calendar-options">
+      ${check('data-calendar-completed',p.calendarCompleted,'완료 Task 표시')}
+      ${check('data-calendar-start',showStart,'시작일 표시')}
+    </div>
+  </div><div class="calendar-grid">
+    ${['일','월','화','수','목','금','토'].map(name=>`<div class="weekday">${name}</div>`).join('')}
+    ${Array.from(days,([date,{dueCards,startCards,startLines}])=>`
+      <div class="calendar-day ${date.slice(0,7)!==month?'outside':''} ${date===today?'today':''}">
+        <div class="day-number"><span>${+date.slice(8)}</span><small>${date}</small></div>
+        ${dueCards.map(({task,label})=>entry(task,label)).join('')}
+        ${startCards.map(task=>entry(task,'시작')).join('')}
+        ${startLines.map(task=>entry(task,'시작',true)).join('')}
+      </div>`).join('')}
+  </div>`;
+}
 const taskColor=(p,t)=>{const [id]=taskLabels(p,t);return p.labels.find(l=>l.id===id)?.color||['#b96b54','#a68e54','#698479'][rank(t.priority)];};
 function timeline(p){
   const showCompleted=p.timelineCompleted??true;
@@ -1335,6 +1369,12 @@ document.addEventListener('change',e=>{const el=e.target,p=planner();(async()=>{
     p.calendarCompleted=el.checked;
     render();
     $('[data-calendar-completed]').focus({preventScroll:true});
+    await persist('');
+  }
+  if(el.matches('[data-calendar-start]')){
+    p.calendarShowStart=el.checked;
+    render();
+    $('[data-calendar-start]').focus({preventScroll:true});
     await persist('');
   }
   if(el.matches('[data-list-completed]')){

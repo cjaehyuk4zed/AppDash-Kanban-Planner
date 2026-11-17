@@ -82,6 +82,7 @@ function validateState(s){
     if(p.timelineCompleted!==undefined&&typeof p.timelineCompleted!=='boolean')fail();
     if(p.listCompleted!==undefined&&typeof p.listCompleted!=='boolean')fail();
     if(p.boardCompleted!==undefined&&typeof p.boardCompleted!=='boolean')fail();
+    if(p.calendarShowStart!==undefined&&typeof p.calendarShowStart!=='boolean')fail();
   }
   return s;
 }

@@ -178,6 +178,7 @@ test('real HTTP lifecycle, readiness, persistence/restart, revision conflict, pr
   const existingPlanner=beforeToggle.state.planners.find(p=>p.id===final.state.planners[0].id);
   assert.equal(Object.hasOwn(existingPlanner,'listCompleted'),false);
   assert.equal(Object.hasOwn(existingPlanner,'boardCompleted'),false);
+  assert.equal(Object.hasOwn(existingPlanner,'calendarShowStart'),false);
   await stop();
   await start();
   const afterUpgrade=(await req('/api/state')).data;
@@ -190,9 +191,10 @@ test('real HTTP lifecycle, readiness, persistence/restart, revision conflict, pr
   const filters={...existingPlanner.filters,dueFrom:'2026-11-10',dueTo:'2026-11-08'};
   assert.equal((await savePlanner({listCompleted:'false'})).status,400);
   assert.equal((await savePlanner({boardCompleted:'false'})).status,400);
+  assert.equal((await savePlanner({calendarShowStart:'false'})).status,400);
   assert.equal((await savePlanner({filters:{...filters,dueTo:'2026-02-30'}})).status,400);
   assert.equal((await savePlanner({filters:{...filters,dueFrom:null}})).status,400);
-  const updates={listCompleted:false,boardCompleted:false,filters};
+  const updates={listCompleted:false,boardCompleted:false,calendarShowStart:false,filters};
   assert.equal((await savePlanner(updates)).status,200);
   await stop();
   await start();

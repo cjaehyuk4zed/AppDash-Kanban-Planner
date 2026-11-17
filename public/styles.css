@@ -19,6 +19,13 @@ button[aria-expanded="true"]{background:#e2ece4;border-color:#91a68d}.task-card{
 [hidden]{display:none!important}body:has(.modal-backdrop){overflow:hidden}
 
 .calendar .view-toolbar{justify-content:flex-start}
+.calendar-options{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px}
+.calendar-options .check{white-space:nowrap}
+.calendar-task.calendar-start-line{display:flex;justify-content:flex-start;align-items:baseline;gap:5px;margin:2px 0;padding:3px 6px;border:0;background:transparent}
+.calendar-start-line small{flex:none;margin:0}
+.calendar-start-line small::after{content:" ·"}
+.calendar-start-line .calendar-task-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.calendar-task.calendar-start-line:hover{background:#e5eddf99}
 .timeline-range{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px}
 .timeline-range .check{white-space:nowrap}
 
