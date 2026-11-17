@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {newPlanner,newProject,newTask,saveTask,toggleProjectCompletion,changesBetween,day} from '../public/model.mjs';
+import {newPlanner,newProject,newTask,saveTask,toggleProjectCompletion,changesBetween,day,filtered} from '../public/model.mjs';
 import {runtime} from '../engine.mjs';
 import {atomicWrite,installFolderImport,recoverFolderImports} from '../workspace-backup.mjs';
 import {releaseFiles} from '../scripts/release.mjs';
@@ -26,8 +26,11 @@ const sourceStore=()=>{
   const state={ui:{collapsed:false},planners:[planner]};
   const before=structuredClone(state);
   task.title='Imported task';
-  toggleProjectCompletion(planner,goal.id,day());
+  const completed=day();
+  toggleProjectCompletion(planner,goal.id,completed);
   planner.filters.project=goal.id;
+  delete planner.filters.dueFrom;delete planner.filters.dueTo;
+  Object.assign(planner.filters,{due:'none',status:'incomplete',from:completed});
   Object.assign(planner.notifications,{teams:true,outlook:true,export:true,teamsUrl:'https://example.invalid/teams-private',outlookUrl:'https://example.invalid/outlook-private',exportFolder:'Z:/previous-location'});
   const history=runtime();
   history.journal=changesBetween(before,state);
@@ -136,6 +139,10 @@ test('clean release starts, keeps data in place across code updates, and imports
     assert.equal(await fs.readFile(path.join(backups,archive,'imported-backups','backups','old-backup.json'),'utf8'),'old app backup');
 
     const live=await state(),oldPlanner=live.state.planners[0];
+    assert.equal(oldPlanner.filters.from,incoming.state.planners[0].filters.from);
+    assert.equal(oldPlanner.filters.dueFrom,undefined);
+    assert.equal(oldPlanner.filters.dueTo,undefined);
+    assert.deepEqual(filtered(oldPlanner),oldPlanner.tasks);
     const notifications=oldPlanner.notifications;
     assert.deepEqual([notifications.teams,notifications.outlook,notifications.export,notifications.exportFolder],[false,false,false,'']);
     assert.equal(notifications.rows[0].time,incoming.state.planners[0].notifications.rows[0].time);
@@ -156,6 +163,8 @@ test('clean release starts, keeps data in place across code updates, and imports
     assert.equal(copied.tasks[0].completedByProject,copied.projects[0].id);
     assert.equal(copied.tasks[0].labels[0],copied.labels[1].id);
     assert.equal(copied.filters.project,copied.projects[0].id);
+    assert.equal(copied.filters.from,oldPlanner.filters.from);
+    assert.deepEqual(filtered(copied),copied.tasks);
     assert.equal(copied.notifications.rows[0].formId,copied.notifications.forms[0].id);
     const history=(await readJSON(file)).runtime.journal.find(entry=>entry.planner===copied.id);
     assert.equal(history.before.task.id,copied.tasks[0].id);

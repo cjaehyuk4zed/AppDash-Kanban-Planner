@@ -30,6 +30,8 @@ test('real HTTP lifecycle, readiness, persistence/restart, revision conflict, pr
  try{
   const legacy=newPlanner(undefined,undefined,true);
   delete legacy.projects;delete legacy.boardGrouped;delete legacy.filters.project;
+  delete legacy.filters.dueFrom;delete legacy.filters.dueTo;
+  Object.assign(legacy.filters,{due:'none',status:'incomplete',from:'2026-11-01'});
   for(const t of legacy.tasks)delete t.projectId;
   const {forms,rows,...notifications}=legacy.notifications;
   legacy.notifications={
@@ -48,6 +50,8 @@ test('real HTTP lifecycle, readiness, persistence/restart, revision conflict, pr
   assert.equal(first.status.projects,true);assert.equal(first.status.projectLabels,true);
   assert.deepEqual(first.state.planners[0].projects,[]);
   assert.equal(first.state.planners[0].filters.project,'all');
+  assert.equal(first.state.planners[0].filters.from,'2026-11-01');
+  assert.equal(first.state.planners[0].filters.dueFrom,undefined);
   assert.ok(first.state.planners[0].tasks.every(t=>t.projectId===null));
   const migrated=first.state.planners[0].notifications;
   assert.equal(first.revision,1);
@@ -173,6 +177,7 @@ test('real HTTP lifecycle, readiness, persistence/restart, revision conflict, pr
   const beforeToggleRaw=await fs.readFile(storePath,'utf8');
   const existingPlanner=beforeToggle.state.planners.find(p=>p.id===final.state.planners[0].id);
   assert.equal(Object.hasOwn(existingPlanner,'listCompleted'),false);
+  assert.equal(Object.hasOwn(existingPlanner,'boardCompleted'),false);
   await stop();
   await start();
   const afterUpgrade=(await req('/api/state')).data;
@@ -181,14 +186,19 @@ test('real HTTP lifecycle, readiness, persistence/restart, revision conflict, pr
   assert.equal(await fs.readFile(storePath,'utf8'),beforeToggleRaw);
 
   const version=afterUpgrade.plannerVersions[existingPlanner.id];
-  const setCompletedVisibility=listCompleted=>req('/api/planner','PUT',{planner:{...existingPlanner,listCompleted},version});
-  assert.equal((await setCompletedVisibility('false')).status,400);
-  assert.equal((await setCompletedVisibility(false)).status,200);
+  const savePlanner=updates=>req('/api/planner','PUT',{planner:{...existingPlanner,...updates},version});
+  const filters={...existingPlanner.filters,dueFrom:'2026-11-10',dueTo:'2026-11-08'};
+  assert.equal((await savePlanner({listCompleted:'false'})).status,400);
+  assert.equal((await savePlanner({boardCompleted:'false'})).status,400);
+  assert.equal((await savePlanner({filters:{...filters,dueTo:'2026-02-30'}})).status,400);
+  assert.equal((await savePlanner({filters:{...filters,dueFrom:null}})).status,400);
+  const updates={listCompleted:false,boardCompleted:false,filters};
+  assert.equal((await savePlanner(updates)).status,200);
   await stop();
   await start();
   const afterToggle=(await req('/api/state')).data;
   assert.equal(afterToggle.revision,afterUpgrade.revision+1);
-  assert.deepEqual(afterToggle.state.planners.find(p=>p.id===existingPlanner.id),{...existingPlanner,listCompleted:false});
+  assert.deepEqual(afterToggle.state.planners.find(p=>p.id===existingPlanner.id),{...existingPlanner,...updates});
   assert.deepEqual(afterToggle.state.planners.find(p=>p.id===otherPlanner.id),otherPlanner);
   assert.equal(afterToggle.plannerVersions[otherPlanner.id],afterUpgrade.plannerVersions[otherPlanner.id]);
  }finally{await stop();for(const dir of ['data','reports','backups']){const target=path.resolve(base,dir,instance);assert.ok(target.startsWith(base+path.sep)&&target.includes(instance));await fs.rm(target,{recursive:true,force:true});}}

@@ -68,8 +68,8 @@ test('goal due dates are inherited in Task queries, messages, reports, and histo
  assert.equal(inherited.due,'');
  assert.equal(m.taskDue(p,inherited),D);
  assert.equal(m.taskDue(p,explicit),m.addDays(D,2));
- p.filters.due='today';
- assert.deepEqual(m.filtered(p,D).map(task=>task.id),[inherited.id]);
+ Object.assign(p.filters,{dueFrom:D,dueTo:D});
+ assert.deepEqual(m.filtered(p).map(task=>task.id),[inherited.id]);
  assert.deepEqual(m.sortTasks(p,[explicit,inherited],'dueAsc').map(task=>task.id),[inherited.id,explicit.id]);
  const n=p.notifications;
  n.forms[0].sections=[m.newSection('all','today')];
@@ -150,8 +150,44 @@ for(const action of ['none','move','label','delete'])test(`completion action ${a
  const result=p.tasks.find(x=>x.id===t.id);if(action==='delete'){assert.equal(result,undefined);return;}assert.equal(result.completed,m.day());if(action==='move')assert.equal(result.bucket,p.buckets[2].id);if(action==='label')assert.deepEqual(result.labels,[p.labels[3].id]);p.completion.action='delete';m.saveTask(p,result);assert.equal(p.tasks.length,1);m.toggleTask(p,t.id);assert.equal(p.tasks[0].completed,'');if(action==='move')assert.equal(p.tasks[0].bucket,p.buckets[2].id);
 });
 test('copy completed draft bypasses completion deletion and uses current draft',()=>{const {p,make}=fixture(),t=make('Original');p.completion.action='delete';const c=m.saveTask(p,{...t,title:'Draft',completed:D},{copy:true});assert.equal(c.title,'Draft 복사');assert.equal(c.completed,D);assert.equal(p.tasks.length,2);});
-test('filters AND fields / OR labels, completion inclusive ranges and due boundaries',()=>{
- const {p,make}=fixture();const a=make('a',{due:D,labels:[p.labels[0].id]}),b=make('b',{due:m.addDays(D,7),labels:[p.labels[1].id]}),c=make('c',{due:m.addDays(D,8)}),d=make('d',{due:m.addDays(D,-1)});make('none');p.filters.due='week';assert.deepEqual(m.filtered(p,D).map(t=>t.id),[a.id,b.id]);p.filters.labels=[p.labels[0].id,p.labels[1].id];assert.equal(m.filtered(p,D).length,2);p.filters.priority='상';assert.equal(m.filtered(p,D).length,0);p.filters.priority='all';p.filters.labels=[];p.filters.due='overdue';assert.deepEqual(m.filtered(p,D).map(t=>t.id),[d.id]);d.completed=D;assert.equal(m.filtered(p,D).length,0);p.filters.due='all';p.filters.from=D;p.filters.to=D;assert.deepEqual(m.filtered(p,D).map(t=>t.id),[d.id]);p.filters.from=m.addDays(D,1);assert.equal(m.filtered(p,D).length,0);assert.ok(c);
+test('filters combine inclusive date ranges and other fields while OR-ing labels',()=>{
+ const {p,make}=fixture(),before=m.addDays(D,-1),after=m.addDays(D,1);
+ const a=make('a',{due:D,completed:D,labels:[p.labels[0].id]});
+ const b=make('b',{due:after,labels:[p.labels[1].id]});
+ const c=make('c',{due:before,completed:D});
+ const d=make('d',{completed:after});
+ const filtered=()=>m.filtered(p).map(task=>task.id);
+
+ // Obsolete settings in an older workspace cannot hide any Tasks.
+ delete p.filters.dueFrom;
+ delete p.filters.dueTo;
+ Object.assign(p.filters,{due:'none',status:'incomplete'});
+ assert.deepEqual(filtered(),[a.id,b.id,c.id,d.id]);
+
+ Object.assign(p.filters,{dueFrom:D,dueTo:after});
+ assert.deepEqual(filtered(),[a.id,b.id]);
+ p.filters.labels=[p.labels[0].id,p.labels[1].id];
+ assert.deepEqual(filtered(),[a.id,b.id]);
+ p.filters.priority='상';
+ assert.deepEqual(filtered(),[]);
+ Object.assign(p.filters,{priority:'all',labels:[],from:D,to:D});
+ assert.deepEqual(filtered(),[a.id]);
+
+ Object.assign(p.filters,{from:'',to:'',dueFrom:'',dueTo:D});
+ assert.deepEqual(filtered(),[a.id,c.id]);
+ Object.assign(p.filters,{dueFrom:D,dueTo:''});
+ assert.deepEqual(filtered(),[a.id,b.id]);
+ p.filters.dueTo=before;
+ assert.deepEqual(filtered(),[]);
+
+ Object.assign(p.filters,{dueFrom:'',dueTo:'',from:after,to:''});
+ assert.deepEqual(filtered(),[d.id]);
+ Object.assign(p.filters,{from:'',to:D});
+ assert.deepEqual(filtered(),[a.id,c.id]);
+ p.filters.from=after;
+ assert.deepEqual(filtered(),[]);
+ p.filters=m.defaultFilters();
+ assert.deepEqual(filtered(),[a.id,b.id,c.id,d.id]);
 });
 test('all eleven sorts, missing dates last in either direction and deterministic tie breaks',()=>{
  const {p,make}=fixture();make('z',{priority:'하',due:'',completed:''});make('a',{priority:'상',due:D});make('b',{priority:'중',due:D});for(const [mode]of m.sorts)assert.equal(m.sortTasks(p,p.tasks,mode).length,3);for(const mode of ['dueAsc','dueDesc'])assert.equal(m.sortTasks(p,p.tasks,mode).at(-1).title,'z');assert.deepEqual(m.sortTasks(p,p.tasks,'dueAsc').map(t=>t.title),['a','b','z']);assert.equal(m.sortTasks(p,p.tasks,'priorityLow')[0].title,'z');

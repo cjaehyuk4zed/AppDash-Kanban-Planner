@@ -92,8 +92,9 @@ export function defaultNotifications(){
   };
 }
 export function newTask(p,bucket,projectId=p.filters.project) { return {id:uid(),title:'',projectId:p.projects?.some(x=>x.id===projectId)?projectId:null,bucket:bucket||p.filters.bucket!=='all'&&p.filters.bucket||p.buckets[0].id,labels:[],priority:'중',start:'',due:'',completed:'',checklist:[],notes:'',showChecklist:false,showNotes:false,order:Math.max(-1,...p.tasks.filter(t=>t.bucket===bucket).map(t=>t.order))+1,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()}; }
+export const defaultFilters=()=>({bucket:'all',priority:'all',project:'all',dueFrom:'',dueTo:'',from:'',to:'',labels:[]});
 export function newPlanner(name='Kanban Planner',description='Kanban planner',examples=false) {
-  const p={id:uid(),name,description,createdAt:new Date().toISOString(),deletedAt:null,buckets:['할 일','진행 중','검토','완료'].map(name=>({id:uid(),name,sort:null})),labels:['#6c80c4','#2f8f83','#c75c42','#d29c2f','#a05a9f','#538f9c','#b34d67','#5f7548'].map(color=>({id:uid(),name:'',color})),tasks:[],sort:'manual',filters:{bucket:'all',priority:'all',due:'all',status:'all',from:'',to:'',labels:[]},appearance:{width:340,colors:clone(palettes[0].colors),custom:[]},completion:{action:'none',bucket:'',label:''},calendarCompleted:true,timelineMode:7,notifications:defaultNotifications()};
+  const p={id:uid(),name,description,createdAt:new Date().toISOString(),deletedAt:null,buckets:['할 일','진행 중','검토','완료'].map(name=>({id:uid(),name,sort:null})),labels:['#6c80c4','#2f8f83','#c75c42','#d29c2f','#a05a9f','#538f9c','#b34d67','#5f7548'].map(color=>({id:uid(),name:'',color})),tasks:[],sort:'manual',filters:defaultFilters(),appearance:{width:340,colors:clone(palettes[0].colors),custom:[]},completion:{action:'none',bucket:'',label:''},calendarCompleted:true,timelineMode:7,notifications:defaultNotifications()};
   p.completion.bucket=p.buckets[0].id; p.completion.label=p.labels[0].id;
   if(examples) {
     const d=day(); const samples=[['요구사항 정리',0,[1],'상',d,addDays(d,3),'',[['Task 필드 정의',true],['완료 액션 정리',false]],'Planner 대체 서비스의 핵심 Task 모델을 정리합니다.'],['Kanban 보드 시안 검토',1,[0,3],'중',d,addDays(d,7),'',[['버킷 추가/삭제',false],['드래그 이동',false]],''],['완료 통계 확인',3,[2],'하','',d,d,[['차트 뷰 확인',true]],'완료 처리된 Task의 회색 상태와 완료 날짜 기록을 확인합니다.']];
@@ -122,17 +123,20 @@ export function sortTasks(p,tasks,mode=p.sort) {
     return n||rank(a.priority)-rank(b.priority)||stable(a,b);
   });
 }
-export function filtered(p,today=day()) { const f=p.filters; return p.tasks.filter(t=>{
-  const due=taskDue(p,t);
-  return (
-  (f.bucket==='all'||t.bucket===f.bucket)&&(f.priority==='all'||t.priority===f.priority)&&
-  matchesProject(t.projectId,f.project)&&
-  (f.status==='all'||(f.status==='complete'?!!t.completed:!t.completed))&&
-  (!f.from||t.completed&&t.completed>=f.from)&&(!f.to||t.completed&&t.completed<=f.to)&&
-  (!f.labels.length||f.labels.some(id=>taskLabels(p,t).includes(id)))&&
-  (f.due==='all'||f.due==='overdue'&&due&&due<today&&!t.completed||f.due==='today'&&due===today||f.due==='week'&&due>=today&&due<=addDays(today,7)||f.due==='none'&&!due)
+function matchesDateRange(value,from,to){
+  if(!from&&!to)return true;
+  return !!value&&(!from||value>=from)&&(!to||value<=to);
+}
+export function filtered(p){
+  const f=p.filters;
+  return p.tasks.filter(t=>
+    (f.bucket==='all'||t.bucket===f.bucket)&&(f.priority==='all'||t.priority===f.priority)&&
+    matchesProject(t.projectId,f.project)&&
+    matchesDateRange(t.completed,f.from,f.to)&&
+    matchesDateRange(taskDue(p,t),f.dueFrom,f.dueTo)&&
+    (!f.labels.length||f.labels.some(id=>taskLabels(p,t).includes(id)))
   );
-}); }
+}
 export function saveTask(p,input,{copy=false,now=new Date().toISOString()}={}) {
   const old=p.tasks.find(t=>t.id===input.id), t=clone(input);
   t.title=t.title.trim()||old?.title||''; if(!t.title) return null;

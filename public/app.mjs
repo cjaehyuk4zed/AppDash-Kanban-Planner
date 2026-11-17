@@ -1,4 +1,4 @@
-import {uid,clone,day,addDays,parseDate,newPlanner,newTask,labelName,bucketName,sorts,filtered,sortTasks,saveTask,toggleTask,removeBucket,removeLabel,moveTask,palettes,rank,validateNotifications,newProject,projectDue,taskDue,toggleProjectCompletion,newMessageForm,newSection,sectionStatuses,dueConditions,sectionTitle,notificationFormats,projectName,projectStats,matchesProject,removeProject,projectLabelId,taskLabels} from './model.mjs';
+import {uid,clone,day,addDays,parseDate,newPlanner,newTask,labelName,bucketName,sorts,filtered,defaultFilters,sortTasks,saveTask,toggleTask,removeBucket,removeLabel,moveTask,palettes,rank,validateNotifications,newProject,projectDue,taskDue,toggleProjectCompletion,newMessageForm,newSection,sectionStatuses,dueConditions,sectionTitle,notificationFormats,projectName,projectStats,matchesProject,removeProject,projectLabelId,taskLabels} from './model.mjs';
 const $=(s,root=document)=>root.querySelector(s), $$=(s,root=document)=>[...root.querySelectorAll(s)];
 const esc=x=>String(x??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
 const icons={goal:'M5 21V4c5-4 9 4 14 0v11c-5 4-9-4-14 0',home:'M3 10 12 3l9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z',board:'M3 4h5v16H3z M10 4h5v10h-5z M17 4h4v13h-4z',calendar:'M4 5h16v16H4z M4 10h16 M8 3v4 M16 3v4',timeline:'M4 5h10v4H4z M9 12h11v4H9z M4 3v19',chart:'M4 20V10h4v10 M10 20V4h4v16 M16 20v-7h4v7',list:'M8 6h13 M8 12h13 M8 18h13 M3 6h1 M3 12h1 M3 18h1',settings:'M9 4h6l1 4 4 1v6l-4 1-1 4H9l-1-4-4-1V9l4-1Z M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0',collapse:'M4 4h16v16H4z M9 4v16 M16 9l-3 3 3 3',plus:'M12 5v14 M5 12h14',close:'M6 6l12 12 M6 18 18 6',trash:'M4 7h16 M9 7V4h6v3 M6 7l1 14h10l1-14 M10 10v7 M14 10v7',edit:'m4 16 12-12 4 4L8 20H4z M14 6l4 4',arrow:'M5 12h14 m-5-5 5 5-5 5',filter:'M4 5h16 M7 12h10 M10 19h4',sort:'M8 4v16 m-4-4 4 4 4-4 M14 5h7 M14 10h5 M14 15h3',more:'M5 12h.1 M12 12h.1 M19 12h.1',check:'m5 12 4 4L19 6',restore:'M4 10a8 8 0 1 1 1 8 M4 4v6h6',copy:'M8 8h13v13H8z M3 16V3h13',grip:'M9 5h.1 M15 5h.1 M9 12h.1 M15 12h.1 M9 19h.1 M15 19h.1'};
@@ -107,7 +107,7 @@ function updateSettingsApplyState(p){
     if(button)button.disabled=!dirty||conflict||!!edit.applying;
   }
 }
-function render(){
+function render({keepFilterPanel=false}={}){
   hideOutput();
   rememberProjectPreview();
   const p=planner();
@@ -119,11 +119,21 @@ function render(){
   $('#app').innerHTML=`<aside class="sidebar ${state.ui.collapsed?'collapsed':''}"><div class="sidebar-top">${ib('collapse','collapse','사이드바 확장·축소')}</div><button class="brand" data-action="home" title="Planner 홈"><img src="/icon.svg" alt=""><span><strong>${esc(p?.name||'Kanban Planner')}</strong><small>${esc(p?.description||'Kanban planner')}</small></span></button><div class="workspace-label">WORKSPACE</div><nav>${btn('home',`${icon('home')}<span>내 Planner</span><b>${count}</b>`,{cls:view==='home'?'active':'',title:'내 Planner'})}${view==='home'?'':`<div class="nav-divider"></div>${menus.filter(([id])=>id!=='projects'||status.projects).map(([id,ic,name])=>btn('nav',`${icon(ic)}<span>${name}</span>`,{id,cls:view===id?'active':'',title:name})).join('')}`}</nav><div class="sidebar-bottom"><span class="status-dot"></span><span id="save-state"></span><small>LOCAL WORKSPACE</small></div></aside>
   <main><header><div><div class="eyebrow">${view==='home'?'YOUR PERSONAL WORKSPACE':esc(p.name)}</div><h1>${view==='home'?'Planner':current[2]}</h1><p>${view==='home'?(trash?'30일 보관':'워크스페이스'):current[3]}</p></div><div class="toolbar">${view==='home'?(trash?'':btn('planner-new',icon('plus')+'새 Planner',{cls:'primary'})):view==='projects'?btn('project-new',icon('plus')+'새 목표',{cls:'primary'}):view==='settings'?'':`${btn('sort',icon('sort')+'정렬',{cls:p.sort!=='manual'?'selected':''})}${btn('filter',icon('filter')+'필터'+(filtersActive(p)?'<i class="active-dot"></i>':''),{cls:filtersActive(p)?'selected':''})}${view==='board'?btn('bucket-new',icon('plus')+'버킷'):''}${btn('task-new',icon('plus')+'Task',{cls:'primary'})}`}</div></header><section id="content" class="content ${view}">${p&&view!=='projects'&&view!=='home'&&view!=='settings'?activeFilterChips(p):''}${view==='home'?home()+(count?'':backupPanel()):view==='projects'?projectsView(p):view==='board'?board(p):view==='calendar'?calendar(p):view==='timeline'?timeline(p):view==='chart'?charts(p):view==='list'?table(p):settings(p)}</section><footer><span>Kanban Planner</span><span>생각을 정리하고, 다음으로 나아가세요.</span></footer></main>`;
   syncProjectPreview(p);
-  storageLabel();if(pop)renderPopover();
+  storageLabel();
+  if(keepFilterPanel&&pop?.kind==='filter'){
+    pop.trigger=$('[data-action="filter"]');
+    pop.trigger.setAttribute('aria-expanded','true');
+  }else if(pop)renderPopover();
 }
-const dueFilterOptions=[['all','전체'],['overdue','기한 초과'],['today','오늘'],['week','7일 이내'],['none','기한 없음']];
-const statusFilterOptions=[['all','전체'],['complete','완료'],['incomplete','미완료']];
-function filtersActive(p){const f=p.filters;return ['bucket','priority','due','status'].some(k=>f[k]!=='all')||(f.project??'all')!=='all'||f.from||f.to||f.labels.length;}
+const dateFilters=[
+  {label:'기한',from:'dueFrom',to:'dueTo'},
+  {label:'완료 일자',from:'from',to:'to'}
+];
+function filtersActive(p){
+  const f=p.filters;
+  return f.bucket!=='all'||f.priority!=='all'||(f.project??'all')!=='all'||
+    dateFilters.some(({from,to})=>f[from]||f[to])||f.labels.length;
+}
 function home(){const list=state.planners.filter(p=>trash?!!p.deletedAt:!p.deletedAt);return `<div class="home-heading"><div class="tabs">${btn('home-normal','내 Planner',{cls:!trash?'active':''})}${btn('home-trash',`휴지통 <span class="count">${state.planners.filter(p=>p.deletedAt).length}</span>`,{cls:trash?'active':''})}</div><span class="muted">${list.length}개의 Planner</span></div>${list.length?`<div class="planner-list">${list.map(p=>`<article class="planner-row"><div class="planner-mark">${icon(trash?'trash':'board')}</div>${trash?`<div class="planner-title"><strong>${esc(p.name)}</strong><small>${esc(p.description)}</small></div><div class="retention"><b>${Math.max(0,Math.ceil((Date.parse(p.deletedAt)+30*86400000-Date.now())/86400000))}일 남음</b><small>${day(new Date(Date.parse(p.deletedAt)+30*86400000))} 영구 삭제 예정</small></div>${ib('planner-restore','restore','Planner 복원',p.id)}`:`<button class="planner-title" data-action="planner-open" data-id="${p.id}"><strong>${esc(p.name)}</strong><small>${esc(p.description)||'설명 없음'}</small></button><div class="planner-count"><b>${p.tasks.length}</b><small>전체 Task</small></div><div class="planner-count"><b>${p.tasks.filter(t=>!t.completed).length}</b><small>미완료</small></div><div class="row-actions">${ib('planner-edit','edit','Planner 편집',p.id)}${ib('planner-delete','trash','Planner 삭제',p.id)}</div>${ib('planner-open','arrow','Planner 열기',p.id)}`}</article>`).join('')}</div>`:empty(trash?'휴지통이 비어 있습니다.':'Planner가 없습니다. 새 Planner를 만들어 시작하세요.')}<div class="home-note"><span class="status-dot"></span>모든 작업은 이 PC의 단일 base 안에 보관됩니다.</div>`;}
 function chips(p,ids){return ids.map(id=>{const l=p.labels.find(x=>x.id===id);return l?`<span class="chip" data-label-id="${id}" style="--label:${l.color}"><i></i>${esc(labelName(p,id))}</span>`:'';}).join('');}
 const completion=(p,t)=>btn('task-toggle',t.completed?icon('check'):'',{id:t.id,cls:`completion ${t.completed?'done':''}`,title:t.completed?'미완료로 변경':'Task 완료'});
@@ -162,11 +172,11 @@ function activeFilterChips(p){
   }
   if(f.bucket!=='all')chips.push(['bucket',`버킷: ${bucketName(p,f.bucket)}`]);
   if(f.priority!=='all')chips.push(['priority',`우선순위: ${f.priority}`]);
-  if(f.due!=='all')chips.push(['due',`기한: ${dueFilterOptions.find(([value])=>value===f.due)[1]}`]);
-  if(f.status!=='all')chips.push(['status',`Task 상태: ${statusFilterOptions.find(([value])=>value===f.status)[1]}`]);
-  if(f.from||f.to){
-    const range=f.from&&f.to?`${f.from} ~ ${f.to}`:f.from?`${f.from} 이후`:`${f.to} 이전`;
-    chips.push(['dates',`완료일: ${range}`]);
+  for(const {label,from,to} of dateFilters){
+    const start=f[from],end=f[to];
+    if(!start&&!end)continue;
+    const range=start&&end?`${start} ~ ${end}`:start?`${start} 이후`:`${end} 이전`;
+    chips.push([from,`${label}: ${range}`]);
   }
   if(f.labels.length){
     const label=f.labels.length===1?`레이블: ${labelName(p,f.labels[0])}`:`레이블 ${f.labels.length}개`;
@@ -320,8 +330,10 @@ function board(p){
   const closedToggle=grouped&&projectFilter==='all'
     ? check('data-board-include-closed',includeClosedBoardProjects,'완료 목표 포함')
     : '';
-  const mode=status.projects?`<div class="view-toolbar project-board-mode"><div class="segmented">${btn('board-group','전체 보드',{id:'flat',cls:grouped?'':'active',extra:`aria-pressed="${!grouped}"`})}${btn('board-group','목표별 보드',{id:'project',cls:grouped?'active':'',extra:`aria-pressed="${!!grouped}"`})}</div>${closedToggle}</div>`:'';
-  if(!grouped)return mode+boardTrack(p,items);
+  const boardModes=status.projects?`<div class="segmented">${btn('board-group','전체 보드',{id:'flat',cls:grouped?'':'active',extra:`aria-pressed="${!grouped}"`})}${btn('board-group','목표별 보드',{id:'project',cls:grouped?'active':'',extra:`aria-pressed="${!!grouped}"`})}</div>`:'';
+  const showCompleted=p.boardCompleted??true;
+  const mode=`<div class="view-toolbar project-board-mode">${boardModes}${grouped?closedToggle:check('data-board-completed',showCompleted,'완료 Task 표시')}</div>`;
+  if(!grouped)return mode+boardTrack(p,showCompleted?items:items.filter(t=>!t.completed));
   const groups=[...p.projects,{id:'none',name:'목표 없음'}].filter(project=>
     projectFilter==='all' ? includeClosedBoardProjects||!project.closed : project.id===projectFilter
   );
@@ -708,13 +720,23 @@ function closeModal({discard=false}={}){
 function autoGrow(el){if(!el)return;el.style.height='auto';el.style.height=Math.max(130,el.scrollHeight)+'px';}
 function closePop(){pop=null;$('#popover').innerHTML='';$$(':is([data-action="sort"],[data-action="filter"],[data-action="bucket-sort"],[data-action="task-options"],#label-search)[aria-expanded="true"]').forEach(e=>e.setAttribute('aria-expanded','false'));}
 function openPop(kind,button,id=''){if(pop?.kind===kind&&pop.id===id&&pop.trigger===button){closePop();return;}closePop();pop={kind,id,trigger:button,anchor:button.getBoundingClientRect()};button.setAttribute('aria-expanded','true');renderPopover();}
+function dateRangeFilter({label,from,to},filters){
+  return `<div class="field" role="group" aria-label="${label}"><span aria-hidden="true">${label}</span>
+    <div class="filter-date-row">
+      ${dateControl(`data-filter="${from}"`,filters[from]??'',`${label} 시작`)}
+      <span aria-hidden="true">~</span>
+      ${dateControl(`data-filter="${to}"`,filters[to]??'',`${label} 끝`)}
+    </div>
+  </div>`;
+}
 function renderPopover(){if(!pop)return;const p=planner(),{kind,id}=pop;let html='';
   if(kind==='sort'||kind==='bucket-sort'){const value=kind==='sort'?p.sort:p.buckets.find(b=>b.id===id).sort;html=`<div class="menu-label">${kind==='sort'?'Task 정렬':'버킷 정렬'}</div>${(kind==='bucket-sort'?[[null,'전체 정렬 따르기'],...sorts]:sorts).map(([mode,name])=>btn('sort-choose',`${esc(name)}${value===mode?icon('check'):''}`,{id:mode||'inherit',cls:value===mode?'active':''})).join('')}`;}
-  if(kind==='filter'){const f=p.filters;html=`<div class="subheading"><h3>필터</h3>${btn('filter-reset','초기화')}</div>${status.projects?field('목표',select('data-filter="project"',projectOptions(p,true),f.project)):''}${field('버킷',select('data-filter="bucket"',[['all','전체'],...p.buckets.map(b=>[b.id,b.name])],f.bucket))}${field('우선순위',select('data-filter="priority"',[['all','전체'],...['상','중','하'].map(x=>[x,x])],f.priority))}${field('기한',select('data-filter="due"',dueFilterOptions,f.due))}${field('Task 상태',select('data-filter="status"',statusFilterOptions,f.status))}${field('완료 일자 시작',dateControl('data-filter="from"',f.from,'완료 일자 시작'))}${field('완료 일자 끝',dateControl('data-filter="to"',f.to,'완료 일자 끝'))}<b class="label-title">레이블</b><div class="filter-labels">${p.labels.map(l=>btn('filter-label',chips(p,[l.id]),{id:l.id,cls:f.labels.includes(l.id)?'selected':''})).join('')}</div>`;}
+  if(kind==='filter'){const f=p.filters;html=`<div class="subheading"><h3>필터</h3>${btn('filter-reset','초기화')}</div>${status.projects?field('목표',select('data-filter="project"',projectOptions(p,true),f.project)):''}${field('버킷',select('data-filter="bucket"',[['all','전체'],...p.buckets.map(b=>[b.id,b.name])],f.bucket))}${field('우선순위',select('data-filter="priority"',[['all','전체'],...['상','중','하'].map(x=>[x,x])],f.priority))}${dateFilters.map(range=>dateRangeFilter(range,f)).join('')}<b class="label-title">레이블</b><div class="filter-labels">${p.labels.map(l=>btn('filter-label',chips(p,[l.id]),{id:l.id,cls:f.labels.includes(l.id)?'selected':''})).join('')}</div>`;}
   if(kind==='task-options')html=btn('task-copy',icon('copy')+'Task 복사')+btn('task-delete',icon('trash')+'Task 삭제',{cls:'danger-text'});
   if(kind==='labels'){const q=($('#label-search')?.value||'').toLowerCase(),list=p.labels.filter(l=>(labelName(p,l.id)+' '+l.color).toLowerCase().includes(q));html=`<div class="label-results">${list.map(l=>`<div class="label-option">${btn('task-label-toggle',`<span class="mini-check ${task.labels.includes(l.id)?'checked':''}">${task.labels.includes(l.id)?icon('check'):''}</span>${chips(p,[l.id])}`,{id:l.id})}${ib('label-rename','edit','레이블 이름 변경',l.id)}${input(`data-label-color="${l.id}" aria-label="레이블 색상"`,l.color,'color')}</div>`).join('')||empty('선택 가능한 결과 없음')}</div><div class="new-label">${input('id="new-label-name" placeholder="새 레이블명" aria-label="새 레이블명" maxlength="160"')}${input('id="new-label-color" aria-label="새 레이블 색상"','#2f8f83','color')}${btn('task-label-add','추가')}</div>`;}
   $('#popover').innerHTML=`<div class="popover ${kind==='filter'?'filter-panel':''} ${kind==='labels'?'label-panel':''}" role="${kind==='filter'?'region':'menu'}" aria-label="${esc(kind)}">${html}</div>`;
-  const trigger=pop.trigger?.isConnected?pop.trigger:$(`[data-action="${kind}"]${id?`[data-id="${id}"]`:''}`);trigger?.setAttribute('aria-expanded','true');
+  pop.trigger=pop.trigger?.isConnected?pop.trigger:$(`[data-action="${kind}"]${id?`[data-id="${id}"]`:''}`);
+  pop.trigger?.setAttribute('aria-expanded','true');
   const el=$('.popover'),width=kind==='filter'?320:kind==='labels'?380:250,a=pop.anchor;el.style.width=`${Math.min(width,window.innerWidth-24)}px`;el.style.left=`${Math.max(12,Math.min(a.left,window.innerWidth-width-12))}px`;el.style.top=`${Math.max(12,Math.min(a.bottom+8,window.innerHeight-Math.min(el.scrollHeight,window.innerHeight-32)-12))}px`;
 }
 
@@ -803,7 +825,8 @@ async function handleAction(action,id,el,e){const p=planner();
     case 'sort-choose':{if(pop.kind==='bucket-sort')p.buckets.find(b=>b.id===pop.id).sort=id==='inherit'?null:id;else{p.sort=id;p.buckets.forEach(b=>b.sort=null);}closePop();render();await persist('정렬 저장 완료');break;}
     case 'filter-chip-clear':{
       const index=$$('.filter-chip').indexOf(el);
-      if(id==='dates')p.filters.from=p.filters.to='';
+      const range=dateFilters.find(({from})=>from===id);
+      if(range)p.filters[range.from]=p.filters[range.to]='';
       else if(id==='labels')p.filters.labels=[];
       else p.filters[id]='all';
       closePop();
@@ -814,7 +837,7 @@ async function handleAction(action,id,el,e){const p=planner();
       break;
     }
     case 'filter-reset':
-      p.filters={project:'all',bucket:'all',priority:'all',due:'all',status:'all',from:'',to:'',labels:[]};
+      p.filters=defaultFilters();
       if(id==='chips')closePop();
       render();
       if(id==='chips')$('[data-action="filter"]')?.focus();
@@ -1287,7 +1310,27 @@ document.addEventListener('change',e=>{const el=e.target,p=planner();(async()=>{
   }
   if(el.id==='task-due')updateTaskDueHint(p);
   if(el.matches('[data-date-picker]')){const text=el.closest('.date-control').querySelector('input[type="text"]');text.value=el.value;text.dispatchEvent(new Event('change',{bubbles:true}));}
-  if(el.dataset.filter){let value=el.value;if(['from','to'].includes(el.dataset.filter)){try{value=parseDate(value);}catch(err){el.value=p.filters[el.dataset.filter];throw err;}}p.filters[el.dataset.filter]=value;const focused=el.dataset.filter;render();const next=$(`[data-filter="${focused}"]`);if(next)next.value=value;await persist('');}
+  if(el.dataset.filter){
+    const key=el.dataset.filter,previous=p.filters[key]??'';
+    let value=el.value;
+    if(el.type==='text'){
+      try{value=parseDate(value);}catch(err){el.value=previous;throw err;}
+      el.value=value;
+      $('[data-date-picker]',el.closest('.date-control')).value=value;
+    }
+    if(value===previous)return;
+    p.filters[key]=value;
+    render({keepFilterPanel:true});
+    await persist('');
+  }
+  if(el.matches('[data-board-completed]')){
+    const scroll=$('.board-track').scrollLeft;
+    p.boardCompleted=el.checked;
+    render();
+    $('.board-track').scrollLeft=scroll;
+    $('[data-board-completed]').focus({preventScroll:true});
+    await persist('');
+  }
   if(el.matches('[data-calendar-completed]')){
     p.calendarCompleted=el.checked;
     render();
@@ -1362,6 +1405,10 @@ document.addEventListener('keydown',e=>{
   }
   if(e.key==='Escape'){if($('#confirm'))return;e.preventDefault();if(e.target.matches('[data-bucket-name],[data-manage-bucket]')){const b=planner().buckets.find(b=>b.id===(e.target.dataset.bucketName||e.target.dataset.manageBucket));e.target.value=b.name;e.target.blur();return;}if(pop){closePop();return;}if(modal)closeModal();else if(projectPreview)closeProjectPreview();}
   if(e.key==='Enter'){
+    if(e.target.matches('[data-filter][type="text"]')){
+      e.preventDefault();
+      e.target.dispatchEvent(new Event('change',{bubbles:true}));
+    }
     if(e.target.id==='check-add-input'){e.preventDefault();handleAction('check-add').catch(err=>notify(err.message,true));}
     if(e.target.id==='label-search'){e.preventDefault();const first=$('[data-action="task-label-toggle"]');if(first)first.click();}
     if(e.target.id==='new-label-name'){e.preventDefault();handleAction('task-label-add').catch(err=>notify(err.message,true));}

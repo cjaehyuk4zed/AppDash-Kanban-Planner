@@ -73,11 +73,15 @@ function validateState(s){
     for(const t of p.tasks){id(t.id);if(t.projectId!==null&&!projectIds.has(t.projectId))fail();if(t.completedByProject!==undefined&&(t.completedByProject!==t.projectId||completedProjects.get(t.projectId)!==t.completed))fail();if(!isString(t.title,10000)||!t.title.trim()||!p.buckets.some(b=>b.id===t.bucket)||!['상','중','하'].includes(t.priority)||!Array.isArray(t.labels)||t.labels.some(id=>!p.labels.some(l=>l.id===id))||!isString(t.notes)||!Array.isArray(t.checklist)||!Number.isFinite(t.order)||typeof t.showChecklist!=='boolean'||typeof t.showNotes!=='boolean')fail();for(const d of ['start','due','completed']){if(!isString(t[d],10)||parseDate(t[d])!==t[d])fail();}for(const c of t.checklist){id(c.id);if(!isString(c.text)||typeof c.done!=='boolean')fail();}for(const d of ['createdAt','updatedAt'])if(!isString(t[d])||isNaN(Date.parse(t[d])))fail();}
     if(!p.filters||!Array.isArray(p.filters.labels)||!p.appearance||!Array.isArray(p.appearance.colors)||p.appearance.colors.length!==4||p.appearance.colors.some(c=>!/^#[a-f0-9]{6}([a-f0-9]{2})?$/i.test(c))||!Array.isArray(p.appearance.custom)||p.appearance.custom.length>12||!Number.isFinite(p.appearance.width)||p.appearance.width<260||p.appearance.width>480||!p.completion||!p.notifications)fail();
     validateNotifications(p.notifications);
-    const f=p.filters;if(!['all','none'].includes(f.project)&&!projectIds.has(f.project))fail();if(!['all',...p.buckets.map(b=>b.id)].includes(f.bucket)||!['all','상','중','하'].includes(f.priority)||!['all','overdue','today','week','none'].includes(f.due)||!['all','complete','incomplete'].includes(f.status)||!isString(f.from,10)||!isString(f.to,10)||parseDate(f.from)!==f.from||parseDate(f.to)!==f.to||f.labels.some(id=>!p.labels.some(l=>l.id===id)))fail();
+    const f=p.filters;if(!['all','none'].includes(f.project)&&!projectIds.has(f.project))fail();if(!['all',...p.buckets.map(b=>b.id)].includes(f.bucket)||!['all','상','중','하'].includes(f.priority)||f.labels.some(id=>!p.labels.some(l=>l.id===id)))fail();
+    for(const date of [f.from,f.to,f.dueFrom===undefined?'':f.dueFrom,f.dueTo===undefined?'':f.dueTo]){
+      if(!isString(date,10)||parseDate(date)!==date)fail();
+    }
     const colorSet=c=>Array.isArray(c)&&c.length===4&&c.every(c=>typeof c==='string'&&/^#[a-f0-9]{6}([a-f0-9]{2})?$/i.test(c));
     if(p.appearance.custom.some(c=>!isString(c.name,80)||!colorSet(c.colors))||!['none','move','label','delete'].includes(p.completion.action)||typeof p.calendarCompleted!=='boolean'||![7,14,28].includes(p.timelineMode))fail();
     if(p.timelineCompleted!==undefined&&typeof p.timelineCompleted!=='boolean')fail();
     if(p.listCompleted!==undefined&&typeof p.listCompleted!=='boolean')fail();
+    if(p.boardCompleted!==undefined&&typeof p.boardCompleted!=='boolean')fail();
   }
   return s;
 }

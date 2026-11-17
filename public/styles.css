@@ -53,6 +53,9 @@ button[aria-expanded="true"]{background:#e2ece4;border-color:#91a68d}.task-card{
 .filter-chip{min-width:0;max-width:100%;border-radius:999px;padding:5px 9px;background:#e7eee5;color:#315d50}
 .filter-chip span{min-width:0;overflow-wrap:anywhere;text-align:left}
 .filter-chip svg{width:12px;height:12px;flex:none}
+.filter-date-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:6px}
+.filter-date-row .date-control>input{padding-inline:7px 27px}
+.filter-date-row .calendar-picker{width:25px}
 .channel-row{display:grid;grid-template-columns:145px minmax(0,1fr) auto;align-items:end;gap:8px 12px;margin:16px 0 23px}
 .channel-row>.field{margin:0}
 .channel-row button,.channel-row .field input{height:38px}
@@ -75,6 +78,7 @@ button[aria-expanded="true"]{background:#e2ece4;border-color:#91a68d}.task-card{
 .message-review button{font-size:calc(10px + var(--font-size-offset));padding:6px 9px}
 .notification-preview-panel{margin-top:20px}
 .project-board-mode{justify-content:flex-start;margin-bottom:14px;margin-inline-end:16px}
+@media(max-width:520px){.project-board-mode .segmented button{padding-inline:9px}}
 .project-lanes{display:grid;gap:18px;min-width:0}
 .project-lane-group{position:relative;min-width:0}
 .project-lane{min-width:0}
