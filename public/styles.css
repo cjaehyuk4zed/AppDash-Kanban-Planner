@@ -30,7 +30,7 @@ button[aria-expanded="true"]{background:#e2ece4;border-color:#91a68d}.task-card{
 .timeline-range .check{white-space:nowrap}
 
 .project-status-tabs{margin-bottom:18px}
-.project-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:18px}
+.project-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,max(320px,40%)),1fr));gap:18px}
 .project-panel-title,.project-meta,.project-panel-footer,.project-metrics{display:flex;align-items:center;gap:6px 10px}
 .project-panel-title,.project-panel-footer{justify-content:space-between}
 .project-panel-title h2{margin:0;min-width:0;font-size:calc(16px + 2pt + var(--font-size-offset));overflow-wrap:anywhere}
